@@ -56,8 +56,9 @@ and `--yes` for an unattended install.
 **As an OpenWrt package:** every release also carries `.ipk` files for OpenWrt 24.10
 (opkg) and `.apk` files for 25.12 (apk-tools), built with the official SDKs for
 `mipsel_24kc` (MT7621, MT7628), `mips_24kc` (ath79), `aarch64_cortex-a53` (Filogic
-MT798x, IPQ807x), `arm_cortex-a7_neon-vfpv4` (IPQ40xx) and `x86_64`. `apk --print-arch`
-(25.12) or the last line of `opkg print-architecture` (24.10) names the AP's architecture.
+MT798x, IPQ807x), `arm_cortex-a7_neon-vfpv4` (IPQ40xx) and `x86_64`.
+`. /etc/openwrt_release; echo $DISTRIB_ARCH` names the AP's package architecture (on 25.12
+`apk --print-arch` prints only the base one, e.g. `mipsel`).
 
 ```sh
 V=0.1.1 ARCH=mipsel_24kc
@@ -70,6 +71,13 @@ apk add --allow-untrusted /tmp/perch-apd.apk      # signed with the SDK's build 
 perch-apd join --controller https://perch.example.com --token mlap_...
 /etc/init.d/perch-apd enable && /etc/init.d/perch-apd start
 ```
+
+**Upgrading** is the same install with the newer package; the configuration and the
+agent's credentials stay (both package managers keep a modified config and put the new
+default beside it as `perch-apd-opkg` / `perch-apd.apk-new`, which can be deleted). opkg
+restarts the daemon. apk on 25.12 replaces the binary without stopping the running
+daemon, so follow it with `/etc/init.d/perch-apd restart`: until then the old binary keeps
+running, and on a 16 MB-flash router both copies take flash space.
 
 The package installs `/usr/bin/perch-apd` and the same init script and config as
 `--install`, and depends only on `ca-bundle`. It is built by the SDK's Go and linked
