@@ -1,0 +1,99 @@
+name: OpenWrt packages
+
+# Builds the .ipk (OpenWrt 24.10, opkg) and .apk (OpenWrt 25.12, apk-tools)
+# packages for every architecture in openwrt/sdk.env with the official SDK
+# images, and attaches them to the tag's GitHub release, which release.yml
+# creates. To add packages to an existing release: Actions → OpenWrt packages
+# → Run workflow (from main), with the tag. The packaging (openwrt/, scripts/)
+# comes from the commit the workflow runs on, the source from the tag.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: openwrt-${{ inputs.tag || github.ref_name }}
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      releases: ${{ steps.m.outputs.releases }}
+      arches: ${{ steps.m.outputs.arches }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        run: |
+          . openwrt/sdk.env
+          list() { printf '%s\n' $1 | jq -R . | jq -cs .; }
+          echo "releases=$(list "$OPENWRT_RELEASES")" >> "$GITHUB_OUTPUT"
+          echo "arches=$(list "$OPENWRT_ARCHES")" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(needs.matrix.outputs.releases) }}
+        arch: ${{ fromJSON(needs.matrix.outputs.arches) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the tag's tree is what gets packaged
+      # Bootstraps the SDK's host Go, which otherwise builds its own chain of
+      # bootstrap compilers first.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+      # Source tarballs, the Go toolchain source and the module cache.
+      - uses: actions/cache@v4
+        with:
+          path: out/openwrt/dl
+          key: openwrt-dl-${{ matrix.release }}-${{ hashFiles('go.sum', 'openwrt/*/Makefile') }}
+          restore-keys: openwrt-dl-${{ matrix.release }}-
+      - name: Build
+        env:
+          SOURCE_REF: refs/tags/${{ env.TAG }}
+        run: scripts/openwrt-package.sh "${{ matrix.arch }}" "${{ matrix.release }}" "$TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-${{ matrix.release }}-${{ matrix.arch }}
+          path: out/openwrt/perch-apd_*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          pattern: openwrt-*
+          merge-multiple: true
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd packages
+          sha256sum perch-apd_* > openwrt-packages.sha256
+          cat openwrt-packages.sha256
+          # On a tag push release.yml creates the release; wait for it.
+          for i in $(seq 1 45); do
+            gh release view "$TAG" >/dev/null 2>&1 && break
+            echo "waiting for release $TAG"; sleep 20
+          done
+          gh release upload "$TAG" perch-apd_* openwrt-packages.sha256 --clobber

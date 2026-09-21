@@ -7,9 +7,11 @@
 #   ./scripts/feeds update perch_apd && ./scripts/feeds install perch-apd
 #   make menuconfig   # Network → Network Monitoring → perch-apd
 #   make package/perch-apd/compile
+# or from a checkout, with Docker: scripts/openwrt-package.sh <arch> <release>
 #
 # The build downloads the Go modules it needs (github.com/capthndsme/perch-agentkit
-# among them) through the SDK's Go proxy settings.
+# among them) through the SDK's Go proxy settings. PKG_HASH is skip: the script
+# and the release workflow place the tagged source tarball in dl/ themselves.
 #
 include $(TOPDIR)/rules.mk
 

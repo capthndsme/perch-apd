@@ -53,8 +53,40 @@ and starts the service. The files are listed in `/lib/upgrade/keep.d/perch-apd`,
 so a sysupgrade that keeps settings keeps the daemon too. Add `--controller`, `--token`
 and `--yes` for an unattended install.
 
-**As an OpenWrt package** (to build it into an image, or `opkg`/`apk` it): the feed is
-in [`openwrt/`](openwrt/perch-apd/Makefile).
+**As an OpenWrt package:** every release also carries `.ipk` files for OpenWrt 24.10
+(opkg) and `.apk` files for 25.12 (apk-tools), built with the official SDKs for
+`mipsel_24kc` (MT7621, MT7628), `mips_24kc` (ath79), `aarch64_cortex-a53` (Filogic
+MT798x, IPQ807x), `arm_cortex-a7_neon-vfpv4` (IPQ40xx) and `x86_64`. `apk --print-arch`
+(25.12) or the last line of `opkg print-architecture` (24.10) names the AP's architecture.
+
+```sh
+V=0.1.0 ARCH=mipsel_24kc
+BASE=https://github.com/capthndsme/perch-apd/releases/download/v$V
+# OpenWrt 24.10
+opkg update && opkg install $BASE/perch-apd_$V-r1_$ARCH.ipk
+# OpenWrt 25.12
+wget -O /tmp/perch-apd.apk $BASE/perch-apd_$V-r1_$ARCH.apk
+apk add --allow-untrusted /tmp/perch-apd.apk      # signed with the SDK's build key, not OpenWrt's
+perch-apd join --controller https://perch.example.com --token mlap_...
+/etc/init.d/perch-apd enable && /etc/init.d/perch-apd start
+```
+
+The package installs `/usr/bin/perch-apd` and the same init script and config as
+`--install`, and depends only on `ca-bundle`. It is built by the SDK's Go and linked
+against the router's musl libc (OpenWrt's Go packaging enables cgo), so it is smaller
+than the static binary: on `mipsel_24kc` (OpenWrt 24.10, Go 1.23) the package is
+2.4 MB and the installed binary 7.0 MB. On 16 MB-flash routers the package inside
+the squashfs image is the better fit.
+
+To build a package yourself, from a checkout with Docker (the SDK image does the work):
+
+```sh
+scripts/openwrt-package.sh mipsel_24kc 24.10.8    # out/openwrt/perch-apd_<version>-r1_mipsel_24kc.ipk
+scripts/openwrt-package.sh mipsel_24kc 25.12.5    # … .apk
+```
+
+`openwrt/sdk.env` pins the releases and architectures `.github/workflows/openwrt.yml`
+builds on every tag. Or add the feed to an SDK or buildroot of your own:
 
 ```sh
 echo 'src-git perch_apd https://github.com/capthndsme/perch-apd.git;main' >> feeds.conf
@@ -63,12 +95,7 @@ make menuconfig                 # Network → Network Monitoring → perch-apd
 make package/perch-apd/compile
 ```
 
-The feed needs the packages feed's Go (`lang/golang`, Go ≥ 1.22). The package installs
-`/usr/bin/perch-apd` and the same init script and config; configure it with
-`perch-apd join --controller <url> --token <token>`. The package is built by your
-SDK's Go and linked against the router's musl libc (OpenWrt's Go packaging enables cgo);
-with OpenWrt 24.10's Go 1.23 the `.ipk` is 2.4 MB and the installed binary 6.9 MB. On
-16 MB-flash routers the package inside the squashfs image is the better fit.
+The feed needs the packages feed's Go (`lang/golang`, Go ≥ 1.22).
 
 ## After installing
 
