@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -272,5 +274,81 @@ func TestOpenWrtPackageFilesInSync(t *testing.T) {
 	}
 	if !bytes.Equal(pkgConf, config.DefaultFile) {
 		t.Fatal("openwrt/perch-apd/files/perch-apd.config differs from internal/config/default.conf")
+	}
+}
+
+func TestKeepListNamesItselfTheDaemonAndTheConfig(t *testing.T) {
+	h := newHarness(t, "")
+	if err := h.env.Install(context.Background(), Options{Yes: true, Controller: h.srv.URL, Token: "t"}); err != nil {
+		t.Fatalf("%v\n%s", err, h.out)
+	}
+	kept := strings.Split(h.read(t, KeepFile), "\n")
+	start := regexp.MustCompile(`(?m)^START=(\d+)$`).FindSubmatch(InitScript)
+	stop := regexp.MustCompile(`(?m)^STOP=(\d+)$`).FindSubmatch(InitScript)
+	if start == nil || stop == nil {
+		t.Fatal("init script without START/STOP")
+	}
+	for _, want := range []string{
+		KeepFile, // or the next firmware drops the list, and the upgrade after it the daemon
+		OptDir + "/",
+		InitPath,
+		"/etc/rc.d/S" + string(start[1]) + "perch-apd",
+		"/etc/rc.d/K" + string(stop[1]) + "perch-apd",
+		ConfigPath,
+	} {
+		found := false
+		for _, line := range kept {
+			found = found || line == want
+		}
+		if !found {
+			t.Errorf("%s does not keep %s", KeepFile, want)
+		}
+	}
+}
+
+func TestNodeExporterHintFitsThePackageManager(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		apk       bool
+		want, not string
+	}{
+		{"opkg", false, "opkg remove $(opkg list-installed | cut -d' ' -f1 | grep '^prometheus-node-exporter-lua-')\n  opkg remove --autoremove prometheus-node-exporter-lua\n", "apk del"},
+		{"apk", true, "apk del $(apk info | grep '^prometheus-node-exporter-lua')\n", "opkg remove"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, "")
+			os.MkdirAll(filepath.Join(h.root, "etc/init.d"), 0o755)
+			os.WriteFile(filepath.Join(h.root, NodeExporter), []byte("#!/bin/sh /etc/rc.common\n"), 0o755)
+			if tc.apk {
+				os.MkdirAll(filepath.Join(h.root, filepath.Dir(ApkDB)), 0o755)
+				os.WriteFile(filepath.Join(h.root, ApkDB), nil, 0o644)
+			}
+			if err := h.env.Install(context.Background(), Options{Yes: true, Controller: h.srv.URL, Token: "t"}); err != nil {
+				t.Fatalf("%v\n%s", err, h.out)
+			}
+			if out := h.out.String(); !strings.Contains(out, tc.want) || strings.Contains(out, tc.not) {
+				t.Fatalf("hint for %s:\n%s", tc.name, out)
+			}
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestJoinThatCannotResolveTheControllerHintsAtRebindProtection(t *testing.T) {
+	h := newHarness(t, "")
+	h.env.HTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{
+			Err: "no such host", Name: "perch.example.com", IsNotFound: true,
+		}}
+	})}
+	if err := h.env.Install(context.Background(), Options{Yes: true, Controller: "https://perch.example.com", Token: "t"}); err != nil {
+		t.Fatalf("%v\n%s", err, h.out)
+	}
+	out := h.out.String()
+	if !strings.Contains(out, "Hint: ") || !strings.Contains(out, "rebind_domain='perch.example.com'") {
+		t.Fatalf("no rebind hint:\n%s", out)
 	}
 }

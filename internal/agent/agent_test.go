@@ -1,16 +1,20 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +36,8 @@ type fakeController struct {
 	wsStatus   int // non-zero: refuse the upgrade with this status
 	onSession  func(ctx context.Context, c *websocket.Conn)
 	subproto   []string
+	extensions []string // Sec-WebSocket-Extensions of each upgrade
+	compress   bool     // accept permessage-deflate like the controller does
 }
 
 func (f *fakeController) handler() http.Handler {
@@ -58,8 +64,13 @@ func (f *fakeController) handler() http.Handler {
 		f.mu.Lock()
 		f.authHeader = append(f.authHeader, r.Header.Get("Authorization"))
 		f.subproto = append(f.subproto, r.Header.Get("Sec-WebSocket-Protocol"))
+		f.extensions = append(f.extensions, r.Header.Get("Sec-WebSocket-Extensions"))
 		status := f.wsStatus
 		onSession := f.onSession
+		mode := websocket.CompressionDisabled
+		if f.compress {
+			mode = websocket.CompressionNoContextTakeover
+		}
 		f.mu.Unlock()
 		if status != 0 {
 			w.Header().Set("Content-Type", "application/json")
@@ -67,12 +78,13 @@ func (f *fakeController) handler() http.Handler {
 			io.WriteString(w, `{"error":"invalid_agent_credentials"}`)
 			return
 		}
-		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{Subprotocol}})
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{Subprotocol}, CompressionMode: mode})
 		if err != nil {
 			f.t.Errorf("accept: %v", err)
 			return
 		}
 		defer c.CloseNow()
+		c.SetReadLimit(4 << 20) // the controller's maxPayload for AP sessions
 		if onSession != nil {
 			onSession(r.Context(), c)
 		}
@@ -293,12 +305,16 @@ func TestShutdownSendsGoingAway(t *testing.T) {
 type fakeMetrics struct {
 	mu    sync.Mutex
 	calls [][]string
+	text  []byte // what Gather returns; nil = one load average
 }
 
 func (f *fakeMetrics) Gather(_ context.Context, names []string) []byte {
 	f.mu.Lock()
 	f.calls = append(f.calls, append([]string(nil), names...))
 	f.mu.Unlock()
+	if f.text != nil {
+		return f.text
+	}
 	return []byte("# TYPE node_load1 gauge\nnode_load1 0.04\n")
 }
 
@@ -477,5 +493,79 @@ func TestParseConfigure(t *testing.T) {
 	}
 	if _, err := ParseConfigure(json.RawMessage(`{"metricsIntervalSeconds":"x"}`)); err == nil {
 		t.Error("bad interval accepted")
+	}
+}
+
+// countingListener counts the bytes the fake controller reads off the wire.
+type countingListener struct {
+	net.Listener
+	n *atomic.Int64
+}
+
+func (l countingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return countingConn{c, l.n}, nil
+}
+
+type countingConn struct {
+	net.Conn
+	n *atomic.Int64
+}
+
+func (c countingConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func TestPushesAreCompressedWhenTheControllerAgrees(t *testing.T) {
+	fc := &fakeController{t: t, compress: true}
+	pushes := make(chan pushed, 4)
+	fc.onSession = func(ctx context.Context, c *websocket.Conn) { readPushes(ctx, t, c, pushes) }
+	srv := httptest.NewUnstartedServer(fc.handler())
+	var onWire atomic.Int64
+	srv.Listener = countingListener{srv.Listener, &onWire}
+	srv.Start()
+	defer srv.Close()
+	text := bytes.Repeat([]byte(`wifi_station_receive_bytes_total{ifname="phy0-ap0",mac="02:00:00:00:00:01"} 7366133107`+"\n"), 400)
+	a := newPushAgent(t, srv.URL, &fakeMetrics{text: text}, 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { a.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	select {
+	case p := <-pushes:
+		if p.params.Text != string(text) {
+			t.Fatal("the push text changed on the way")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no push")
+	}
+	fc.mu.Lock()
+	offered := strings.Join(fc.extensions, "; ")
+	fc.mu.Unlock()
+	if !strings.Contains(offered, "permessage-deflate") {
+		t.Fatalf("offered extensions %q", offered)
+	}
+	// Upgrade request plus one push: far less than the 36 KB of text.
+	if n := onWire.Load(); n > int64(len(text))/4 {
+		t.Fatalf("%d bytes on the wire for a %d-byte push", n, len(text))
+	}
+}
+
+func TestDescribeHintsAtDNSRebindProtection(t *testing.T) {
+	notFound := &url.Error{Op: "Get", URL: "https://perch.example.com/api/v1/ap-agent/ws", Err: &net.OpError{
+		Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "perch.example.com", IsNotFound: true},
+	}}
+	if got := describe(notFound); !strings.Contains(got, "rebind_domain='perch.example.com'") {
+		t.Fatalf("no rebind hint: %s", got)
+	}
+	timeout := &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "i/o timeout", Name: "perch.example.com", IsTimeout: true}}
+	if got := describe(timeout); strings.Contains(got, "rebind") {
+		t.Fatalf("rebind hint on a timeout: %s", got)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -408,7 +409,24 @@ func describe(err error) string {
 	if errors.As(err, &uerr) {
 		return err.Error() + " (install ca-bundle, set ca_file, or tls_insecure '1' for a self-signed certificate)"
 	}
+	if hint := DNSHint(err); hint != "" {
+		return err.Error() + " (" + hint + ")"
+	}
 	return err.Error()
+}
+
+// DNSHint explains the usual reason the controller's name does not resolve on
+// an OpenWrt AP when it does everywhere else: dnsmasq's rebind protection
+// drops upstream answers that point at private addresses, which is exactly
+// what a controller on the LAN gets. "" for any other error.
+func DNSHint(err error) string {
+	var dnsErr *net.DNSError
+	if !errors.As(err, &dnsErr) || !dnsErr.IsNotFound || dnsErr.Name == "" {
+		return ""
+	}
+	return "if the name points at a LAN address, OpenWrt's DNS rebind protection may be dropping the answer " +
+		"(logread: possible DNS-rebind attack); allow it with: uci add_list dhcp.@dnsmasq[0].rebind_domain='" +
+		dnsErr.Name + "'; uci commit dhcp; service dnsmasq reload"
 }
 
 // session holds one link session: agent.configure feeds the push schedule
@@ -432,8 +450,12 @@ func (a *Agent) session(ctx context.Context) error {
 		},
 		HTTPClient: a.http,
 		ReadLimit:  readLimitBytes,
-		Log:        a.log,
-		Dispatcher: a.disp,
+		// permessage-deflate without context takeover, as the collector does:
+		// a push is 20-40 KB of Prometheus text that deflates about 7x. A
+		// controller that does not enable it simply leaves it off.
+		Compression: true,
+		Log:         a.log,
+		Dispatcher:  a.disp,
 		OnNotification: func(_ context.Context, _ *link.Session, m *rpc.Message) {
 			if m.Method != "agent.configure" {
 				a.log.Debug("notification from the controller", "method", m.Method)
@@ -458,6 +480,7 @@ func (a *Agent) session(ctx context.Context) error {
 				<-sctx.Done()
 				return
 			}
+			var params []byte // reused: pushes of one session are sequential
 			link.RunPusher(sctx, link.PushOptions{
 				Configs:      configs,
 				Fallback:     &link.Schedule{Interval: defaultPushInterval},
@@ -471,13 +494,8 @@ func (a *Agent) session(ctx context.Context) error {
 					gctx, cancel := context.WithTimeout(pctx, collectTimeout)
 					text := a.mets.Gather(gctx, names)
 					cancel()
-					err := s.Notify("metrics.push", map[string]any{
-						"format":      "prometheus-text",
-						"text":        string(text),
-						"collectedAt": start.UTC().Format(time.RFC3339),
-						"durationMs":  time.Since(start).Milliseconds(),
-						"seq":         seq,
-					})
+					params = pushParams(params, text, start, time.Since(start), seq)
+					err := s.NotifyRaw("metrics.push", params)
 					if err != nil && pctx.Err() == nil {
 						a.log.Debug("metrics push not sent", "err", err)
 					}

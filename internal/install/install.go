@@ -42,16 +42,23 @@ const (
 	OpenWrtRelease = "/etc/openwrt_release"
 	CABundle       = "/etc/ssl/certs/ca-certificates.crt"
 	NodeExporter   = "/etc/init.d/prometheus-node-exporter-lua"
+	ApkDB          = "/lib/apk/db/installed" // apk-tools (OpenWrt 25.x); opkg before
 )
 
 // keepList makes a manual install survive sysupgrade: sysupgrade's config
 // backup includes every path listed under /lib/upgrade/keep.d (files and
-// symlinks, so the rc.d links that enable the service come back too).
+// symlinks, so the rc.d links that enable the service come back too). The
+// list names itself: the new firmware does not ship it, so without that line
+// the first upgrade keeps the daemon and the second one drops it. It also
+// names the configuration, which base-files keeps with all of /etc/config/,
+// so the credentials do not depend on that.
 const keepList = `# perch-apd installed by 'perch-apd install': keep it across sysupgrade.
+/lib/upgrade/keep.d/perch-apd
 /opt/perch-apd/
 /etc/init.d/perch-apd
 /etc/rc.d/S95perch-apd
 /etc/rc.d/K10perch-apd
+/etc/config/perch-apd
 `
 
 // Env is the environment an install runs in; tests point Root at a temp dir
@@ -322,7 +329,11 @@ func (e *Env) configureAndJoin(ctx context.Context, o Options, manageService boo
 		case errors.As(err, &se) && se.Status >= 400 && se.Status < 500:
 			return fmt.Errorf("the controller refused the join: %v", err)
 		default:
-			e.printf("Could not reach the controller right now (%v).\nThe token is saved; the service will keep trying to join.\n", err)
+			e.printf("Could not reach the controller right now (%v).\n", err)
+			if hint := agent.DNSHint(err); hint != "" {
+				e.printf("Hint: %s\n", hint)
+			}
+			e.printf("The token is saved; the service will keep trying to join.\n")
 		}
 	}
 
@@ -342,9 +353,16 @@ func (e *Env) configureAndJoin(ctx context.Context, o Options, manageService boo
 		e.printf("The access point shows up in the dashboard under Settings → Wi-Fi sources.\n")
 	}
 	if e.exists(NodeExporter) {
-		e.printf("prometheus-node-exporter-lua is still installed. Once the dashboard shows this AP as connected, it is no longer needed:\n" +
-			"  opkg remove prometheus-node-exporter-lua --autoremove   (apk del prometheus-node-exporter-lua on 25.x)\n" +
-			"  (keep it only if something other than Perch scrapes :9100)\n")
+		e.printf("prometheus-node-exporter-lua is still installed. Once the dashboard shows this AP as connected, it is no longer needed:\n")
+		if e.exists(ApkDB) {
+			e.printf("  apk del $(apk info | grep '^prometheus-node-exporter-lua')\n")
+		} else {
+			// The collector sub-packages depend on the base package, and opkg
+			// refuses to remove a package others depend on: them first.
+			e.printf("  opkg remove $(opkg list-installed | cut -d' ' -f1 | grep '^prometheus-node-exporter-lua-')\n" +
+				"  opkg remove --autoremove prometheus-node-exporter-lua\n")
+		}
+		e.printf("  (keep it only if something other than Perch scrapes :9100)\n")
 	}
 	return nil
 }

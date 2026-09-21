@@ -60,7 +60,7 @@ MT798x, IPQ807x), `arm_cortex-a7_neon-vfpv4` (IPQ40xx) and `x86_64`. `apk --prin
 (25.12) or the last line of `opkg print-architecture` (24.10) names the AP's architecture.
 
 ```sh
-V=0.1.0 ARCH=mipsel_24kc
+V=0.1.1 ARCH=mipsel_24kc
 BASE=https://github.com/capthndsme/perch-apd/releases/download/v$V
 # OpenWrt 24.10
 opkg update && opkg install $BASE/perch-apd_$V-r1_$ARCH.ipk
@@ -106,9 +106,20 @@ perch-apd uninstall [--purge]         # /opt install only; packages: opkg remove
 ```
 
 When the dashboard shows the AP as connected, `prometheus-node-exporter-lua*` is no
-longer needed (`opkg remove prometheus-node-exporter-lua --autoremove`, `apk del` on
-25.x); nothing scrapes the AP any more. An AP the dashboard already scraped over HTTP is
-recognised by its BSSIDs when it joins, and keeps its history.
+longer needed: nothing scrapes the AP any more. The collector packages depend on the
+base package, so they go first (`join` and `--install` print the line for the AP's
+package manager):
+
+```sh
+# OpenWrt 24.10 (opkg)
+opkg remove $(opkg list-installed | cut -d' ' -f1 | grep '^prometheus-node-exporter-lua-')
+opkg remove --autoremove prometheus-node-exporter-lua
+# OpenWrt 25.12 (apk)
+apk del $(apk info | grep '^prometheus-node-exporter-lua')
+```
+
+An AP the dashboard already scraped over HTTP is recognised by its BSSIDs when it
+joins, and keeps its history.
 
 ## Configuration
 
@@ -157,13 +168,25 @@ set with `agent.configure`. The controller can call:
 | `system.reboot` | reboot after answering |
 | `ping` | round trip |
 
-Wire format and error codes: [PROTOCOL.md](PROTOCOL.md).
+Pushes are compressed (permessage-deflate, about 7× smaller) when the controller
+enables it: Perch Network Controller newer than 0.2.0. With an older controller the
+session simply runs uncompressed. Wire format and error codes: [PROTOCOL.md](PROTOCOL.md).
 
 ## Resource use
 
-Measured on a TP-Link Archer AX23 (MT7621, OpenWrt 25.12): one full collection (670
-lines) takes 0.2 s of CPU and the daemon's resident memory is ~8-10 MB. The daemon sets a
-32 MiB soft memory limit for the Go runtime unless `GOMEMLIMIT` is set.
+Measured on a TP-Link Archer AX23 (MT7621, OpenWrt 25.12) pushing every 5 s:
+
+| | 0.1.0 | 0.1.1 |
+|---|---|---|
+| CPU per push | ~100 ms | 54 ms (about 1% of one core) |
+| bytes on the wire per push | 23 KB | 3.7 KB (permessage-deflate) |
+| resident memory | 14.0 MB | 12.4 MB |
+
+On 32-bit CPUs the daemon runs Go on one thread (`GOMAXPROCS=1`) unless `GOMAXPROCS` is
+set: MIPS32 and ARMv5 emulate 64-bit atomics with locks, and with a thread per hardware
+thread the scheduler and the idle GC workers spent more CPU than the work did. A push is
+also encoded in one pass instead of three. The daemon sets a 32 MiB soft memory limit
+for the Go runtime unless `GOMEMLIMIT` is set.
 
 The binary has no HTTP server; most of it is Go's TLS and HTTP client, which the
 WebSocket needs. Its size depends on the Go release it is built with more than on
@@ -179,6 +202,13 @@ Releases pin the older supported Go line (`release.yml`) for that reason.
 
 ## Troubleshooting
 
+- **`join` or the log says `no such host` although the name resolves elsewhere**: the
+  controller's name points at a LAN address and the AP's dnsmasq drops such answers
+  (DNS rebind protection; `logread` shows `possible DNS-rebind attack detected`). Allow
+  that one name on the AP (the daemon's message prints this line with the name filled
+  in):
+  `uci add_list dhcp.@dnsmasq[0].rebind_domain='perch.example.com'; uci commit dhcp; service dnsmasq reload`.
+  It lives in `/etc/config/dhcp`, so it survives upgrades.
 - **`HTTP 404 … no AP daemon support`**: the controller predates the AP daemon, or the
   URL points somewhere else.
 - **WebSocket fails behind a reverse proxy**: the proxy must pass `Upgrade`. Apache 2.4.47+:

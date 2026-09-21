@@ -30,7 +30,7 @@ User-Agent: perch-apd/0.1.0 (linux/mipsle)
 
 {
   "token": "mlap_7fQ2…",
-  "hostname": "OpenWrt-garage",
+  "hostname": "ap-garage",
   "model": "TP-Link Archer AX23 v1",
   "boardName": "tplink,archer-ax23-v1",
   "release": "25.12.4",
@@ -62,7 +62,7 @@ User-Agent: perch-apd/0.1.0 (linux/mipsle)
     "agentId": "4b9d0c1e2f3a4b5c6d7e8f9012345678",
     "agentSecret": "q0cV8kX1…(43 chars, base64url)",
     "apId": 4,
-    "apName": "OpenWrt-garage",
+    "apName": "ap-garage",
     "outcome": "linked"
   }
 }
@@ -97,11 +97,19 @@ GET /api/v1/ap-agent/ws HTTP/1.1
 Upgrade: websocket
 Authorization: Bearer 4b9d0c1e2f3a4b5c6d7e8f9012345678.q0cV8kX1…
 Sec-WebSocket-Protocol: perch-ap.v1
-User-Agent: perch-apd/0.1.0 (linux/mipsle)
+Sec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover; server_no_context_takeover
+User-Agent: perch-apd/0.1.1 (linux/mipsle)
 ```
 
 The server selects the subprotocol `perch-ap.v1`. A client that offers
 no subprotocol is treated as v1.
+
+Compression: since 0.1.1 the agent offers permessage-deflate without context
+takeover in either direction (a `metrics.push` is 20–40 KB of Prometheus text
+that deflates about 7×; the agent compresses messages of 512 bytes and more).
+A controller that does not enable the extension answers without it and the
+session runs uncompressed; the controller compresses its own messages of 1 KB
+and more.
 
 Handshake failures are plain HTTP responses before the upgrade:
 
@@ -177,7 +185,7 @@ calls `system.info`.
 {
   "agentVersion": "0.1.0",
   "protocol": 1,
-  "hostname": "OpenWrt-garage",
+  "hostname": "ap-garage",
   "model": "TP-Link Archer AX23 v1",
   "boardName": "tplink,archer-ax23-v1",
   "system": "MediaTek MT7621 ver:1 eco:3",

@@ -14,7 +14,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -151,6 +153,15 @@ func run(args []string) int {
 	return 0
 }
 
+// oneProc reports whether the daemon runs on a single P: on 32-bit CPUs,
+// unless GOMAXPROCS is set. There Go emulates 64-bit atomics with locks
+// (MIPS32, ARMv5), and with a P per hardware thread the scheduler and the
+// idle GC workers spin on them: on an MT7621 (two cores, four threads) one P
+// cut the CPU per push by a third. The daemon's work is sequential anyway.
+func oneProc(intSize int, getenv func(string) string) bool {
+	return intSize == 32 && getenv("GOMAXPROCS") == ""
+}
+
 // device bundles the collaborators every command that touches the hardware needs.
 type device struct {
 	nl       *nl80211.Client
@@ -250,7 +261,11 @@ func runDaemon(ctx context.Context, cfgPath string) int {
 		// Soft limit: small routers have 64-128 MB. The daemon itself needs ~10 MB.
 		debug.SetMemoryLimit(32 << 20)
 	}
-	log.Info("starting", "version", version.Version, "arch", version.Arch(), "config", cfgPath)
+	if oneProc(strconv.IntSize, os.Getenv) {
+		runtime.GOMAXPROCS(1)
+	}
+	log.Info("starting", "version", version.Version, "arch", version.Arch(), "config", cfgPath,
+		"gomaxprocs", runtime.GOMAXPROCS(0))
 
 	d := newDevice(log)
 	defer d.close()
