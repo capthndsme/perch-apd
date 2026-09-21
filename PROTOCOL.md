@@ -119,7 +119,7 @@ Handshake failures are plain HTTP responses before the upgrade:
 | 401 | credentials unknown or revoked | if a `join_token` is configured, join again; else retry every 5 min |
 | 404 | the controller has no AP daemon support (older version) | retry every 5 min |
 | 429 | too many failed attempts from this address | wait `Retry-After` |
-| 503 | server shutting down | exponential backoff |
+| 503 | server shutting down, or just started (`gateway_starting`, `Retry-After: 1`) | exponential backoff |
 
 Close codes the server uses:
 

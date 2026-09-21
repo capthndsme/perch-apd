@@ -16,7 +16,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=perch-apd
-PKG_VERSION:=0.1.1
+PKG_VERSION:=0.1.2
 PKG_RELEASE:=1
 
 PKG_SOURCE:=perch-apd-$(PKG_VERSION).tar.gz
@@ -61,6 +61,18 @@ endef
 
 define Package/perch-apd/conffiles
 /etc/config/perch-apd
+endef
+
+# An apk upgrade (OpenWrt 25.x) replaces the binary without stopping the
+# running daemon (opkg stops it in the old package's prerm first), and the
+# "start" in default_postinst leaves a running procd service alone: without a
+# restart the old version keeps running, and holds its deleted binary's flash.
+# No exit here: apk inlines this after default_postinst in the same script.
+define Package/perch-apd/postinst
+#!/bin/sh
+if [ -z "$${IPKG_INSTROOT}" ] && [ "$${PKG_UPGRADE}" = "1" ] && /etc/init.d/perch-apd running; then
+	/etc/init.d/perch-apd restart
+fi
 endef
 
 define Package/perch-apd/install
