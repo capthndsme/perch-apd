@@ -1,0 +1,187 @@
+# Perch AP Daemon (`perch-apd`)
+
+The access point daemon of [Perch](https://github.com/capthndsme/perch-controller): one
+static binary per OpenWrt access point that
+
+1. **replaces `prometheus-node-exporter-lua-*`.** It collects the AP's Wi-Fi interfaces
+   and associated stations (from nl80211, the same kernel calls iwinfo makes), network
+   counters, CPU, memory and conntrack with the lua exporter's metric names and labels,
+   and **pushes** them to the Perch Network Controller on the interval the controller sets. It also
+   fills the per-station byte counters the lua exporter declares but never emits.
+2. **bridges the AP to the Perch Network Controller** on the same WebSocket.
+   Through it the dashboard can kick or steer a client, blink the AP's LEDs to find it on
+   a shelf, and reboot it, without SSH keys on the server.
+
+The daemon opens no port: it dials out to the controller (so NAT and firewalls are not a
+problem) and nothing can connect to it. It executes a fixed list of methods
+(PROTOCOL.md); there is no remote shell.
+
+## Install
+
+In the dashboard: **Settings → Wi-Fi sources → New join token**. It shows these commands
+with your controller URL and token filled in.
+
+**One-liner** (picks the binary for the router's architecture and checks its checksum):
+
+```sh
+wget -qO- https://github.com/capthndsme/perch-apd/releases/latest/download/install.sh \
+  | sh -s -- --controller https://perch.example.com --token mlap_...
+```
+
+**By hand:** download the binary for your AP and let it install itself.
+
+| Asset | For |
+|---|---|
+| `perch-apd-linux-mipsle` | MT7621, MT7628 (`mipsel_24kc`) |
+| `perch-apd-linux-mips` | Atheros/QCA ath79 (`mips_24kc`) |
+| `perch-apd-linux-armv7` | IPQ40xx, IPQ806x, mvebu, sunxi (ARMv7 with VFP) |
+| `perch-apd-linux-armv5` | kirkwood, bcm53xx and other ARM without VFP |
+| `perch-apd-linux-arm64` | Filogic MT798x, IPQ807x, BCM27xx 64-bit (`aarch64`) |
+| `perch-apd-linux-amd64` | x86_64 |
+
+```sh
+cd /tmp
+wget -O perch-apd https://github.com/capthndsme/perch-apd/releases/latest/download/perch-apd-linux-mipsle
+chmod +x perch-apd
+./perch-apd --install              # asks for the controller URL and the join token
+```
+
+`--install` copies the binary to `/opt/perch-apd/`, installs the procd service
+(`/etc/init.d/perch-apd`, enabled at boot), writes `/etc/config/perch-apd`,
+joins the controller right away (so a wrong token shows up now, not in a log later)
+and starts the service. The files are listed in `/lib/upgrade/keep.d/perch-apd`,
+so a sysupgrade that keeps settings keeps the daemon too. Add `--controller`, `--token`
+and `--yes` for an unattended install.
+
+**As an OpenWrt package** (to build it into an image, or `opkg`/`apk` it): the feed is
+in [`openwrt/`](openwrt/perch-apd/Makefile).
+
+```sh
+echo 'src-git perch_apd https://github.com/capthndsme/perch-apd.git;main' >> feeds.conf
+./scripts/feeds update perch_apd && ./scripts/feeds install perch-apd
+make menuconfig                 # Network → Network Monitoring → perch-apd
+make package/perch-apd/compile
+```
+
+The feed needs the packages feed's Go (`lang/golang`, Go ≥ 1.22). The package installs
+`/usr/bin/perch-apd` and the same init script and config; configure it with
+`perch-apd join --controller <url> --token <token>`. The package is built by your
+SDK's Go and linked against the router's musl libc (OpenWrt's Go packaging enables cgo);
+with OpenWrt 24.10's Go 1.23 the `.ipk` is 2.4 MB and the installed binary 6.9 MB. On
+16 MB-flash routers the package inside the squashfs image is the better fit.
+
+## After installing
+
+```sh
+logread -e perch-apd                  # "joined the controller", "connected to the controller"
+perch-apd join --token mlap_...       # after "Forget agent" in the dashboard, or a new controller
+perch-apd uninstall [--purge]         # /opt install only; packages: opkg remove / apk del
+```
+
+When the dashboard shows the AP as connected, `prometheus-node-exporter-lua*` is no
+longer needed (`opkg remove prometheus-node-exporter-lua --autoremove`, `apk del` on
+25.x); nothing scrapes the AP any more. An AP the dashboard already scraped over HTTP is
+recognised by its BSSIDs when it joins, and keeps its history.
+
+## Configuration
+
+`/etc/config/perch-apd`, section `config agent 'main'`:
+
+| Option | Default | |
+|---|---|---|
+| `enabled` | `1` | |
+| `controller` | | Perch Network Controller URL, e.g. `https://perch.example.com` (a path prefix is kept) |
+| `join_token` | | one-time; cleared after a successful join |
+| `agent_id`, `agent_secret` | | issued by the controller; forgetting the agent in the dashboard revokes them |
+| `tls_insecure` | `0` | accept a self-signed certificate |
+| `ca_file` | | extra CA bundle (PEM) for a private CA |
+| `log_level` | `info` | `debug`, `info`, `warn`, `error` |
+
+How often metrics are pushed is not configured here: the server sends it (the AP's poll
+interval under Settings → Wi-Fi sources) when the daemon connects, and again when it
+changes.
+
+`/etc/init.d/perch-apd restart` after editing (a `uci commit` + `reload_config` does it too).
+
+## Commands
+
+```
+perch-apd install | --install     install into /opt/perch-apd and join
+perch-apd join                    (re)join a controller
+perch-apd uninstall | --uninstall remove the /opt install (--purge: also the config)
+perch-apd run                     the daemon (what the init script starts)
+perch-apd metrics [--collect wifi,netdev]   print the metrics once
+perch-apd clients                 associated Wi-Fi clients, JSON
+perch-apd info                    what the controller sees (system.info), JSON
+perch-apd version
+```
+
+## Over the WebSocket
+
+The daemon pushes `metrics.push` (the Prometheus text) every interval the controller
+set with `agent.configure`. The controller can call:
+
+| Method | Does |
+|---|---|
+| `system.info` | model, release, kernel, radios, interfaces, capabilities |
+| `clients.list` | associated stations with signal, rates, bytes, connected time |
+| `client.kick` | `ubus call hostapd.<ifname> del_client` (optional ban time = steering) |
+| `locate.start` / `locate.stop` | blink every LED, then restore each LED's trigger and settings |
+| `system.reboot` | reboot after answering |
+| `ping` | round trip |
+
+Wire format and error codes: [PROTOCOL.md](PROTOCOL.md).
+
+## Resource use
+
+Measured on a TP-Link Archer AX23 (MT7621, OpenWrt 25.12): one full collection (670
+lines) takes 0.2 s of CPU and the daemon's resident memory is ~8-10 MB. The daemon sets a
+32 MiB soft memory limit for the Go runtime unless `GOMEMLIMIT` is set.
+
+The binary has no HTTP server; most of it is Go's TLS and HTTP client, which the
+WebSocket needs. Its size depends on the Go release it is built with more than on
+anything in this repository (MIPS, stripped, same code):
+
+| Go | mipsle | gzip (≈ flash on JFFS2/UBIFS) | arm64 |
+|---|---|---|---|
+| 1.23 (OpenWrt 24.10 SDK) | 6.9 MB | 2.4 MB | 6.1 MB |
+| 1.26 (release builds) | 7.9 MB | 2.8 MB | 6.6 MB |
+| 1.27 | 8.5 MB | 3.0 MB | 7.1 MB |
+
+Releases pin the older supported Go line (`release.yml`) for that reason.
+
+## Troubleshooting
+
+- **`HTTP 404 … no AP daemon support`**: the controller predates the AP daemon, or the
+  URL points somewhere else.
+- **WebSocket fails behind a reverse proxy**: the proxy must pass `Upgrade`. Apache 2.4.47+:
+  `ProxyPass / http://127.0.0.1:12553/ upgrade=websocket`; nginx: `proxy_http_version 1.1`
+  and the `Upgrade`/`Connection` headers.
+- **`x509: certificate signed by unknown authority`**: install `ca-bundle`, set `ca_file`,
+  or `tls_insecure '1'` for a self-signed certificate.
+- **The AP was forgotten in the dashboard** ("Forget agent"): create a new join token and
+  run `perch-apd join --token …`.
+
+## Development
+
+```sh
+make test        # go test ./...
+make build       # out/perch-apd for this machine
+make release     # dist/: every architecture, install.sh, checksums.txt
+```
+
+Pure Go, no cgo: `CGO_ENABLED=0` cross-compiles to every target (MIPS with
+`GOMIPS=softfloat`). Pushing a `v*` tag runs `.github/workflows/release.yml`, which
+publishes the assets the install commands download.
+
+The WebSocket session (dial, pings, JSON-RPC, calls, the push scheduler, reconnect
+backoff) and the `/proc` parsers for load, memory, interface counters and conntrack come
+from [perch-agentkit](https://github.com/capthndsme/perch-agentkit), which the
+[Perch Network Collector](https://github.com/capthndsme/perch-collector) uses too. To
+work on both at once, check them out side by side and use a `go.work` with
+`use ./perch-apd ./perch-agentkit` plus
+`replace github.com/capthndsme/perch-agentkit v0.1.0 => ./perch-agentkit`.
+
+## License
+
+MIT

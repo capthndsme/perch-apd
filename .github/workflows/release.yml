@@ -1,0 +1,34 @@
+name: Release
+
+# Push a tag like v0.1.0: builds every architecture and publishes a GitHub
+# release whose assets are what install.sh and the dashboard's install
+# commands download (…/releases/latest/download/<asset>).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Each Go release has grown the binary (MIPS, same code: 1.23 6.9 MB,
+          # 1.26 7.9 MB, 1.27 8.5 MB; 1.27 routes encoding/json through json/v2
+          # and adds ML-DSA). Stay on the older SUPPORTED line; move to 1.27.x
+          # when 1.26 stops getting security fixes (Go 1.28, Feb 2027).
+          go-version: "1.26.x"
+      - run: go test ./...
+      - name: Build
+        run: make release VERSION="${GITHUB_REF_NAME#v}"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "perch-apd ${GITHUB_REF_NAME#v}" \
+            --generate-notes

@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # go.mod's minimum (what an OpenWrt SDK feed build may have), the
+        # release toolchain (release.yml) and the latest.
+        go: ["1.22.x", "1.26.x", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: make release VERSION=ci
+      - uses: actions/upload-artifact@v4
+        if: matrix.go == '1.26.x'
+        with:
+          name: binaries
+          path: dist/
