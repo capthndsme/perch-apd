@@ -25,8 +25,16 @@ with your controller URL and token filled in.
 
 ```sh
 wget -qO- https://github.com/capthndsme/perch-apd/releases/latest/download/install.sh \
-  | sh -s -- --controller https://perch.example.com --token mlap_...
+  | sh -s -- --controller http://192.168.1.10:8080 --token mlap_...
 ```
+
+The controller URL is the address you open the dashboard at. For the default Docker
+install that is plain HTTP, as above, which is supported but encrypts nothing between
+the AP and the controller: keep the controller and the APs' management addresses on a
+management VLAN that client devices cannot reach (worth it with HTTPS too), or serve the
+controller over HTTPS (`--controller https://perch.example.com`). The dashboard marks APs that connect over
+plain HTTP. Why and how:
+[Plain HTTP and a management VLAN](https://github.com/capthndsme/perch-controller#plain-http-and-a-management-vlan).
 
 **By hand:** download the binary for your AP and let it install itself.
 
@@ -68,7 +76,7 @@ opkg update && opkg install $BASE/perch-apd_$V-r1_$ARCH.ipk
 # OpenWrt 25.12
 wget -O /tmp/perch-apd.apk $BASE/perch-apd_$V-r1_$ARCH.apk
 apk add --allow-untrusted /tmp/perch-apd.apk      # signed with the SDK's build key, not OpenWrt's
-perch-apd join --controller https://perch.example.com --token mlap_...
+perch-apd join --controller http://192.168.1.10:8080 --token mlap_...
 /etc/init.d/perch-apd enable && /etc/init.d/perch-apd start
 ```
 
@@ -137,7 +145,7 @@ joins, and keeps its history.
 | Option | Default | |
 |---|---|---|
 | `enabled` | `1` | |
-| `controller` | | Perch Network Controller URL, e.g. `https://perch.example.com` (a path prefix is kept) |
+| `controller` | | Perch Network Controller URL, e.g. `http://192.168.1.10:8080` or `https://perch.example.com` (a path prefix is kept) |
 | `join_token` | | one-time; cleared after a successful join |
 | `agent_id`, `agent_secret` | | issued by the controller; forgetting the agent in the dashboard revokes them |
 | `tls_insecure` | `0` | accept a self-signed certificate |

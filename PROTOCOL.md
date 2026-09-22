@@ -104,6 +104,11 @@ User-Agent: perch-apd/0.1.1 (linux/mipsle)
 The server selects the subprotocol `perch-ap.v1`. A client that offers
 no subprotocol is treated as v1.
 
+Transport: `wss://` when the controller URL is `https://`, plain `ws://` when it is
+`http://` (the default Docker install). Plain carries the bearer and everything else
+unencrypted; the controller README's "Plain HTTP and a management VLAN" says how to run
+it safely.
+
 Compression: since 0.1.1 the agent offers permessage-deflate without context
 takeover in either direction (a `metrics.push` is 20–40 KB of Prometheus text
 that deflates about 7×; the agent compresses messages of 512 bytes and more).
