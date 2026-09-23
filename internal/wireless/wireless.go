@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/capthndsme/perch-agentkit/openwrt/ubus"
 	"github.com/capthndsme/perch-apd/internal/nl80211"
-	"github.com/capthndsme/perch-apd/internal/ubus"
 )
 
 // Radio is one UCI wifi-device as netifd reports it.
