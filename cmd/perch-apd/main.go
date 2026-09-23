@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/capthndsme/perch-agentkit/hoststat"
+	"github.com/capthndsme/perch-agentkit/openwrt/ubus"
 	"github.com/capthndsme/perch-agentkit/rpc"
 	"github.com/capthndsme/perch-apd/internal/agent"
 	"github.com/capthndsme/perch-apd/internal/collect"
@@ -31,7 +32,6 @@ import (
 	"github.com/capthndsme/perch-apd/internal/leds"
 	"github.com/capthndsme/perch-apd/internal/nl80211"
 	"github.com/capthndsme/perch-apd/internal/sysinfo"
-	"github.com/capthndsme/perch-apd/internal/ubus"
 	"github.com/capthndsme/perch-apd/internal/version"
 	"github.com/capthndsme/perch-apd/internal/wireless"
 )
