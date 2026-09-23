@@ -42,8 +42,11 @@ const (
 
 // Timing.
 const (
-	slowRetry      = 5 * time.Minute
-	replacedRetry  = 60 * time.Second
+	slowRetry     = 5 * time.Minute
+	replacedRetry = 60 * time.Second
+	// reconnectMax caps the transport-error ladder (1 s doubling, ±10 %
+	// jitter), so an AP is back within about 30 s of a controller restart.
+	reconnectMax   = 30 * time.Second
 	readLimitBytes = 4 << 20
 
 	// Metrics push (PROTOCOL.md §2.3): the controller sets the interval with
@@ -307,7 +310,7 @@ func (a *Agent) clearSession(s *link.Session) {
 
 // Run keeps the agent joined and connected until ctx is done.
 func (a *Agent) Run(ctx context.Context) error {
-	bo := link.Backoff{Min: time.Second, Max: time.Minute}
+	bo := link.Backoff{Min: time.Second, Max: reconnectMax}
 	warnedNoToken := false
 	for ctx.Err() == nil {
 		if a.cfg.Controller == "" {
@@ -383,6 +386,9 @@ func (a *Agent) retryDelay(err error, bo *link.Backoff) time.Duration {
 	if errors.As(err, &se) {
 		switch {
 		case se.Status == http.StatusTooManyRequests && se.RetryAfter > 0:
+			return se.RetryAfter
+		case se.Status >= 500 && se.RetryAfter > 0 && se.RetryAfter < reconnectMax:
+			// 503 gateway_starting (Retry-After: 1) right after a restart.
 			return se.RetryAfter
 		case se.Status == http.StatusUnauthorized, se.Status == http.StatusUnprocessableEntity,
 			se.Status == http.StatusNotFound, se.Status == http.StatusForbidden, se.Status == http.StatusBadRequest:

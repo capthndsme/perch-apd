@@ -84,7 +84,7 @@ Errors:
 | 401 | `{"error":"invalid_join_token","message":"…"}` (unknown, revoked, expired or used up) | log, retry every 5 min (the admin may fix it) |
 | 422 | validation errors | log, retry every 5 min |
 | 429 | `{"error":"rate_limited","message":"…","retryAfterSeconds":N}` + `Retry-After` | wait `retryAfterSeconds` |
-| 5xx / network | — | exponential backoff 1 s → 60 s |
+| 5xx / network | — | exponential backoff 1 s → 30 s (a `Retry-After` under 30 s on a 5xx is honoured) |
 
 The agent stores `agentId` + `agentSecret` in `/etc/config/perch-apd`
 and clears `join_token` there. A join token is only ever needed again after
@@ -137,7 +137,7 @@ Close codes the server uses:
 Liveness: the server sends a WebSocket ping every 30 s and drops a
 connection that has not answered the previous one. The agent pings every
 30 s as well (10 s timeout) and reconnects when that fails. Reconnects use
-exponential backoff with jitter, 1 s doubling to 60 s, reset after a session
+exponential backoff with jitter, 1 s doubling to 30 s (60 s before 1.0.0-rc.2), reset after a session
 that lasted a minute.
 
 Frames: one JSON-RPC 2.0 object per text frame, no batches. Max frame 4 MiB.

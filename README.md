@@ -30,6 +30,25 @@ wget -qO- https://github.com/capthndsme/perch-apd/releases/latest/download/insta
   | sh -s -- --controller http://192.168.1.10:8080 --token mlap_...
 ```
 
+Each release's `install.sh` installs that release (`…/releases/download/v1.0.0-rc.2/install.sh`
+installs 1.0.0-rc.2; `releases/latest` is the newest final release). The dashboard's commands
+are pinned to the perch-apd release the controller was released with, so an AP gets the version
+that matches its controller. `PERCH_APD_VERSION=<version>` (or `latest`) and
+`PERCH_APD_BASE_URL=<mirror>` in front of `sh` pick another one.
+
+**Controller by name:** a stock OpenWrt AP drops DNS answers that point a name at a private
+address (dnsmasq's rebind protection), so an AP cannot resolve `perch.lan` or
+`perch.example.com` → `192.168.x.x` until the name is allowed. When the controller URL is a
+host name, the dashboard's commands start with that one line, in plain sight:
+
+```sh
+uci -q del_list dhcp.@dnsmasq[0].rebind_domain='perch.example.com'; \
+uci add_list dhcp.@dnsmasq[0].rebind_domain='perch.example.com' && uci commit dhcp && /etc/init.d/dnsmasq reload
+```
+
+perch-apd never changes the AP's DNS settings by itself; if the join fails with
+"no such host" it prints this line with the name filled in and keeps retrying.
+
 The controller URL is the address you open the dashboard at. For the default Docker
 install that is plain HTTP, as above, which is supported but encrypts nothing between
 the AP and the controller: keep the controller and the APs' management addresses on a
@@ -51,7 +70,7 @@ plain HTTP. Why and how:
 
 ```sh
 cd /tmp
-wget -O perch-apd https://github.com/capthndsme/perch-apd/releases/latest/download/perch-apd-linux-mipsle
+wget -O perch-apd https://github.com/capthndsme/perch-apd/releases/download/v1.0.0-rc.2/perch-apd-linux-mipsle
 chmod +x perch-apd
 ./perch-apd --install              # asks for the controller URL and the join token
 ```
@@ -71,7 +90,7 @@ MT798x, IPQ807x), `arm_cortex-a7_neon-vfpv4` (IPQ40xx) and `x86_64`.
 `apk --print-arch` prints only the base one, e.g. `mipsel`).
 
 ```sh
-V=0.1.2 ARCH=mipsel_24kc
+V=1.0.0-rc.2 ARCH=mipsel_24kc      # the release; tag and file names both use it
 BASE=https://github.com/capthndsme/perch-apd/releases/download/v$V
 # OpenWrt 24.10
 opkg update && opkg install $BASE/perch-apd_$V-r1_$ARCH.ipk
@@ -90,15 +109,17 @@ the package restarts it after an apk upgrade (the upgrade to 0.1.2 included; upg
 0.1.1 or older with apk needs `/etc/init.d/perch-apd restart`). Old and new binary take
 flash side by side for a moment: on a 16 MB-flash router, have about 3.5 MB free.
 
-**Release candidates** (tags like `v1.0.0-rc.1`) are GitHub pre-releases. `install.sh`,
-the `…/releases/latest/download/…` links above and the controller's install commands
-resolve to the last final release and never to a release candidate; to try one, use its
-tag's URLs (`…/releases/download/v1.0.0-rc.1/…`, or `PERCH_APD_BASE_URL` for
-`install.sh`). Its packages carry the pre-release in the form apk-tools accepts,
-`1.0.0_rc1` (`perch-apd_1.0.0_rc1-r1_<arch>.ipk` / `.apk`), and `perch-apd --version`
-prints `1.0.0-rc.1`. apk sorts `1.0.0_rc1` below `1.0.0`, so the final release upgrades
-it; opkg sorts it above and answers "Not downgrading", so on 24.10 move from a release
-candidate to the final release with `opkg install --force-downgrade`.
+**Release candidates** (tags like `v1.0.0-rc.2`) are GitHub pre-releases:
+`…/releases/latest/…` resolves to the last final release and never to a release
+candidate, so use the tag's URLs (the snippets above, `install.sh` from the tag, or the
+dashboard of a controller of the same release line). Release files are named with the
+release version (`perch-apd_1.0.0-rc.2-r1_<arch>.ipk` / `.apk`, from rc.2 on) and
+`perch-apd --version` prints `1.0.0-rc.2`. Inside, the package version is in each package
+manager's pre-release form, so the final release is always an upgrade: `1.0.0~rc2` in the
+`.ipk` (opkg sorts `~` below the release) and `1.0.0_rc2` in the `.apk` (apk-tools rejects
+`~`). **From rc.1 on OpenWrt 24.10:** rc.1's `.ipk` carried `1.0.0_rc1`, which opkg sorts
+above every later release, so moving off it takes `opkg install --force-downgrade <rc.2 .ipk>`
+once; from rc.2 on, `~rc3` and `1.0.0` install as plain upgrades.
 
 The package installs `/usr/bin/perch-apd` and the same init script and config as
 `--install`, and depends only on `ca-bundle`. It is built by the SDK's Go and linked

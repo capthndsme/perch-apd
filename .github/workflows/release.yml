@@ -2,7 +2,8 @@ name: Release
 
 # Push a tag like v1.0.0: builds every architecture and publishes a GitHub
 # release whose assets are what install.sh and the dashboard's install
-# commands download (…/releases/latest/download/<asset>).
+# commands download (…/releases/download/<tag>/<asset>; `make release` stamps
+# the tag into install.sh as its default).
 on:
   push:
     tags: ["v*"]
@@ -28,8 +29,8 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        # A tag with a pre-release part (v1.0.0-rc.1) is a GitHub pre-release,
-        # which …/releases/latest (install.sh, the dashboard) never resolves to.
+        # A tag with a pre-release part (v1.0.0-rc.2) is a GitHub pre-release,
+        # which …/releases/latest never resolves to.
         run: |
           pre=; case "$GITHUB_REF_NAME" in *-*) pre=--prerelease ;; esac
           gh release create "$GITHUB_REF_NAME" dist/* $pre \

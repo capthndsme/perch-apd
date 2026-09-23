@@ -1,16 +1,31 @@
 #!/bin/sh
 # Perch AP Daemon (perch-apd) one-line installer for OpenWrt:
 #
-#   wget -qO- https://github.com/capthndsme/perch-apd/releases/latest/download/install.sh \
+#   wget -qO- https://github.com/capthndsme/perch-apd/releases/download/v1.0.0/install.sh \
 #     | sh -s -- --controller https://perch.example.com --token mlap_...
 #
 # Picks the binary for this router's architecture, checks it against the
 # release's checksums.txt, then runs `perch-apd --install` with the
 # arguments given here (without them it asks for the controller and token).
-# PERCH_APD_BASE_URL overrides where the binaries come from.
+#
+# It installs the release it was published with (`make release` stamps
+# PERCH_APD_RELEASE below), so the install.sh of a release candidate installs
+# that candidate, not the newest final release. Overrides:
+#   PERCH_APD_VERSION=1.2.3 | latest   another release from GitHub
+#   PERCH_APD_BASE_URL=<url>           where the binaries come from (a mirror)
 set -eu
 
-BASE_URL="${PERCH_APD_BASE_URL:-https://github.com/capthndsme/perch-apd/releases/latest/download}"
+# Stamped by `make release`; "latest" in a source checkout.
+PERCH_APD_RELEASE=latest
+
+RELEASES=https://github.com/capthndsme/perch-apd/releases
+release="${PERCH_APD_VERSION:-$PERCH_APD_RELEASE}"
+case "$release" in
+	latest) default_base="$RELEASES/latest/download" ;;
+	v*) default_base="$RELEASES/download/$release" ;;
+	*) default_base="$RELEASES/download/v$release" ;;
+esac
+BASE_URL="${PERCH_APD_BASE_URL:-$default_base}"
 
 die() { echo "install.sh: $*" >&2; exit 1; }
 
@@ -62,7 +77,7 @@ file="perch-apd-linux-$arch"
 tmp="/tmp/perch-apd.$$"
 trap 'rm -f "$tmp" "$tmp.sums"' EXIT INT TERM
 
-echo "Downloading $file ..."
+echo "Downloading $file from $BASE_URL ..."
 fetch "$BASE_URL/$file" "$tmp" || die "download failed: $BASE_URL/$file"
 if fetch "$BASE_URL/checksums.txt" "$tmp.sums" 2>/dev/null; then
 	want="$(grep " $file\$" "$tmp.sums" | cut -d' ' -f1)"

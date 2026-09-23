@@ -16,17 +16,21 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=perch-apd
-PKG_VERSION:=1.0.0_rc1
+PERCH_VERSION:=1.0.0-rc.2
 PKG_RELEASE:=1
-# PKG_VERSION is in the form both opkg and apk-tools accept: a pre-release is
-# 1.0.0_rc1 (apk rejects 1.0.0-rc.1). PERCH_VERSION is the upstream version,
-# which names the git tag (v1.0.0-rc.1) and is what --version prints.
-PERCH_VERSION:=$(subst _alpha,-alpha.,$(subst _beta,-beta.,$(subst _rc,-rc.,$(subst _pre,-pre.,$(PKG_VERSION)))))
+# PERCH_VERSION is the upstream version: it names the git tag (v1.0.0-rc.2)
+# and is what --version prints. PKG_VERSION is the same version in the form
+# the package manager sorts correctly: opkg (OpenWrt 24.10, .ipk) wants
+# 1.0.0~rc2, which sorts below 1.0.0; apk-tools (25.12, .apk) wants 1.0.0_rc2
+# and rejects both "~" and "-rc.2". scripts/openwrt-package.sh sets both
+# lines explicitly for each build.
+PERCH_PRE_SEP:=$(if $(CONFIG_USE_APK),_,~)
+PKG_VERSION:=$(subst -alpha.,$(PERCH_PRE_SEP)alpha,$(subst -beta.,$(PERCH_PRE_SEP)beta,$(subst -pre.,$(PERCH_PRE_SEP)pre,$(subst -rc.,$(PERCH_PRE_SEP)rc,$(PERCH_VERSION)))))
 
-PKG_SOURCE:=perch-apd-$(PKG_VERSION).tar.gz
+PKG_SOURCE:=$(PKG_NAME)-$(PERCH_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/capthndsme/perch-apd/tar.gz/v$(PERCH_VERSION)?
 PKG_HASH:=skip
-PKG_BUILD_DIR:=$(BUILD_DIR)/perch-apd-$(PKG_VERSION)
+PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PERCH_VERSION)
 
 PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE

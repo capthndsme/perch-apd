@@ -31,7 +31,14 @@ release: clean
 	GOOS=linux GOARCH=arm GOARM=5 go build $(GOFLAGS) -ldflags "$(LDFLAGS) -X $(MODULE)/internal/version.goarm=v5" -o $(DIST)/perch-apd-linux-armv5 ./cmd/perch-apd
 	GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(DIST)/perch-apd-linux-mipsle ./cmd/perch-apd
 	GOOS=linux GOARCH=mips GOMIPS=softfloat go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(DIST)/perch-apd-linux-mips ./cmd/perch-apd
-	cp scripts/install.sh $(DIST)/install.sh
+	# install.sh installs the release it ships with: a version like 1.2.3 or
+	# 1.2.3-rc.1 is stamped in, anything else (a CI or dev build) keeps latest.
+	if printf '%s' '$(VERSION)' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$$'; then \
+		sed 's/^PERCH_APD_RELEASE=latest$$/PERCH_APD_RELEASE=v$(VERSION)/' scripts/install.sh > $(DIST)/install.sh; \
+		grep -q '^PERCH_APD_RELEASE=v$(VERSION)$$' $(DIST)/install.sh; \
+	else \
+		cp scripts/install.sh $(DIST)/install.sh; \
+	fi
 	cd $(DIST) && sha256sum perch-apd-linux-* install.sh > checksums.txt
 	@ls -l $(DIST)
 
