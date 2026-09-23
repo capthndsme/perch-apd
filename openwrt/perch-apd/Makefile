@@ -16,7 +16,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=perch-apd
-PERCH_VERSION:=1.0.0-rc.2
+PERCH_VERSION:=1.0.0
 PKG_RELEASE:=1
 # PERCH_VERSION is the upstream version: it names the git tag (v1.0.0-rc.2)
 # and is what --version prints. PKG_VERSION is the same version in the form
