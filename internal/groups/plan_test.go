@@ -1,6 +1,7 @@
 package groups
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -293,5 +294,50 @@ func TestPlanKeepsAnExistingDynamicVLAN(t *testing.T) {
 	}
 	if section(back.Wireless, "default_radio0")["dynamic_vlan"] != "2" {
 		t.Fatal("dynamic_vlan not put back")
+	}
+}
+
+func TestBindingIsOneStationPerMAC(t *testing.T) {
+	w, n := parse(t, "wireless", wirelessConf), parse(t, "network", filteringNet)
+	d := desired()
+	d.Stations[1].MACs = []string{"02:00:00:00:00:22", "02:00:00:00:00:21"}
+	res, err := Plan(w, n, d, Facts{TrunkPort: "wan"}, Ledger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 24.10 reads `mac` as a string and drops a list: each MAC is its own
+	// station with `option mac`.
+	for i, mac := range []string{"02:00:00:00:00:21", "02:00:00:00:00:22"} {
+		name := fmt.Sprintf("perch_ws%d", i+1)
+		s := res.Wireless.Section(name)
+		if s == nil {
+			t.Fatalf("%s missing", name)
+		}
+		for _, o := range s.Options {
+			if o.Name == "mac" && (o.Value.IsList || o.Value.Str() != mac) {
+				t.Fatalf("%s mac %+v, want option %s", name, o.Value, mac)
+			}
+		}
+		eq(t, name, section(res.Wireless, name),
+			map[string]string{"~type": "wifi-station", "iface": "default_radio0", "key": "building-key-1", "vid": "102", "mac": mac})
+	}
+	if strings.Contains(string(uci.Render(res.Wireless)), "list mac") {
+		t.Fatal("a list mac was rendered")
+	}
+	if len(res.BindingKeys) != 1 || res.BindingKeys[0] != keyDigest("building-key-1") {
+		t.Fatalf("binding keys %v", res.BindingKeys)
+	}
+}
+
+func TestGroupKeyEqualToTheSSIDsOwnIsSkipped(t *testing.T) {
+	w, n := parse(t, "wireless", wirelessConf), parse(t, "network", filteringNet)
+	d := desired()
+	d.Stations = []Station{{Key: "building-key-1", VID: 101}}
+	res, err := Plan(w, n, d, Facts{TrunkPort: "wan"}, Ledger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Wireless.Section("perch_ws0") != nil || len(res.Issues) != 1 {
+		t.Fatalf("station written or no issue: %v", res.Issues)
 	}
 }

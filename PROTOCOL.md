@@ -292,7 +292,9 @@ carried tagged to the gateway over the trunk port.
 ```
 
 A station without `key` is a binding: the MACs keep the SSID's own passphrase but land in
-the VLAN (`wifi-station` with `mac`). The agent writes only its own sections (`perch_*`)
+the VLAN, one `wifi-station` per MAC with a single `option mac` (OpenWrt 24.10 reads `mac` as a
+string and drops a `list`; 25.12 splits the option into its array). A group key equal to a
+managed interface's own passphrase is skipped with an issue. The agent writes only its own sections (`perch_*`)
 plus `dynamic_vlan '1'` on the managed `wifi-iface`s; a trunk port inside an untagged bridge
 converts that bridge to VLAN filtering (its interfaces move to `<bridge>.1`). What it changed
 in sections it does not own is recorded and put back when no longer needed. `trunk: "auto"`
@@ -304,8 +306,13 @@ managed[], issues[]}`. The same revision again answers the same; another one whi
 waits is `busy`. Unless `groups.confirm {revision}` arrives before `deadline`
 (`confirmSeconds`, 30-600, default 120) the agent restores the previous `wireless` and
 `network` byte for byte and reloads (also at start when the window passed while it was down).
+Before it keeps a revision, `groups.confirm` reads back hostapd's PSK files
+(`/var/run/hostapd-*.psk`): a binding's passphrase held for any MAC (`00:00:00:00:00:00`, a
+binding that lost its MAC on the way to hostapd, which would put every client of the SSID in
+that VLAN) rolls back at once and refuses the confirm with `unsafe_binding`.
 Refusals (`-32000`, `data.error`): `no_managed_iface`, `trunk_unknown`, `uncommitted`
-(changes staged in LuCI), `busy`, `apply_failed`, `not_pending`; `-32602` `bad_params`.
+(changes staged in LuCI), `busy`, `apply_failed`, `not_pending`, `unsafe_binding`; `-32602`
+`bad_params`.
 
 `groups.state` → `{appliedRevision, pending: {revision, deadline} | null, lastRollback?,
 trunkPort, stations: [{mac, vid, ifname}], issues[]}`: `stations` are the clients on group

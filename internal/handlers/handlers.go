@@ -128,7 +128,7 @@ func (d *Deps) groupsConfirm(ctx context.Context, raw json.RawMessage) (any, err
 	if err := rpc.Params(raw, &p); err != nil {
 		return nil, err
 	}
-	if err := d.Groups.Confirm(p.Revision); err != nil {
+	if err := d.Groups.Confirm(ctx, p.Revision); err != nil {
 		return nil, groupsError(err)
 	}
 	return map[string]any{"revision": p.Revision, "state": "applied"}, nil

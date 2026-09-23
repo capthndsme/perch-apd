@@ -65,7 +65,9 @@ type pending struct {
 	Ledger   Ledger    `json:"ledger"`
 	// Network: the network config changed (a rollback reloads the network).
 	Network bool `json:"network"`
-	Result  ApplyResult
+	// BindingKeys: digests of the passphrases bindings reuse (psk.go).
+	BindingKeys []string `json:"bindingKeys,omitempty"`
+	Result      ApplyResult
 }
 
 type rollback struct {
@@ -300,7 +302,8 @@ func (e *Engine) Apply(ctx context.Context, d Desired) (ApplyResult, error) {
 	deadline := e.o.Now().Add(time.Duration(confirm) * time.Second)
 	out.State = "pending_confirm"
 	out.Deadline = deadline.UTC().Format(time.RFC3339)
-	e.st.Pending = &pending{Revision: d.Revision, Deadline: deadline, Ledger: res.Ledger, Network: nChanged, Result: out}
+	e.st.Pending = &pending{Revision: d.Revision, Deadline: deadline, Ledger: res.Ledger, Network: nChanged,
+		BindingKeys: res.BindingKeys, Result: out}
 	e.persistLocked()
 	if wChanged {
 		if err := writeAtomic(e.o.WirelessPath, newW, fileMode(e.o.WirelessPath)); err != nil {
@@ -339,8 +342,9 @@ func (e *Engine) reload(ctx context.Context, network bool) error {
 	return e.o.Run(rctx, "wifi", "reload")
 }
 
-// Confirm keeps a pending apply.
-func (e *Engine) Confirm(revision int64) error {
+// Confirm keeps a pending apply, unless hostapd holds a binding's
+// passphrase for every client: then it rolls back (psk.go).
+func (e *Engine) Confirm(ctx context.Context, revision int64) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	p := e.st.Pending
@@ -349,6 +353,10 @@ func (e *Engine) Confirm(revision int64) error {
 			return nil // confirmed already
 		}
 		return refuse("not_pending", "revision %d is not waiting for a confirm", revision)
+	}
+	if err := checkPSKFiles(e.o.FS, p.BindingKeys); err != nil {
+		e.rollbackLocked(context.WithoutCancel(ctx), err.Error())
+		return refuse("unsafe_binding", "rolled back: %v", err)
 	}
 	if e.timer != nil {
 		e.timer.Stop()

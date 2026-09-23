@@ -85,6 +85,9 @@ type Result struct {
 	// Managed are the wifi-iface sections the groups use.
 	Managed []string
 	Issues  []string
+	// BindingKeys are the SHA-256 digests (hex) of the passphrases bindings
+	// reuse: hostapd must never hold one of them for any MAC.
+	BindingKeys []string
 }
 
 // Refusal is a plan that cannot be applied, with a machine code.
@@ -169,8 +172,12 @@ func Validate(d Desired) error {
 	if d.Revision < 1 {
 		return refuse("bad_params", "revision must be 1 or more")
 	}
-	if len(d.VLANs) > MaxVLANs || len(d.Stations) > MaxStations {
-		return refuse("bad_params", "at most %d VLANs and %d stations", MaxVLANs, MaxStations)
+	macs := 0
+	for _, st := range d.Stations {
+		macs += len(st.MACs)
+	}
+	if len(d.VLANs) > MaxVLANs || len(d.Stations) > MaxStations || macs > MaxStations {
+		return refuse("bad_params", "at most %d VLANs, %d stations and %d bound MACs", MaxVLANs, MaxStations, MaxStations)
 	}
 	seen := map[int]bool{}
 	for _, v := range d.VLANs {
@@ -364,31 +371,45 @@ func Plan(wireless, network *uci.Config, d Desired, f Facts, prev Ledger) (*Resu
 		}
 	}
 
-	// A wifi-station per station and managed interface. A binding uses the
-	// interface's own passphrase.
+	// A wifi-station per station and managed interface; a binding gets one
+	// per MAC and uses the interface's own passphrase. The MAC is a single
+	// `option mac`: 24.10 reads a string (a `list` is dropped, and the entry
+	// then matches every client), 25.12 an array, which netifd splits from
+	// a string option.
 	idx := 0
 	for _, st := range d.Stations {
+		macs := append([]string(nil), st.MACs...)
+		sort.Strings(macs)
 		for _, m := range managed {
 			key := st.Key
+			if key != "" && key == m.key {
+				// Every client of the SSID would land in this VLAN.
+				res.Issues = append(res.Issues, fmt.Sprintf("a group key equals %s's own passphrase; skipped", m.name))
+				continue
+			}
 			if key == "" {
 				key = m.key
 				if !validKey(key) {
 					res.Issues = append(res.Issues, fmt.Sprintf("%s has no usable passphrase for bindings", m.name))
 					continue
 				}
+				res.BindingKeys = appendUnique(res.BindingKeys, keyDigest(key))
 			}
 			opts := []uci.Option{
 				{Name: "iface", Value: uci.String(m.name)},
 				{Name: "key", Value: uci.String(key)},
 				{Name: "vid", Value: uci.String(strconv.Itoa(st.VID))},
 			}
-			if len(st.MACs) > 0 {
-				macs := append([]string(nil), st.MACs...)
-				sort.Strings(macs)
-				opts = append(opts, uci.Option{Name: "mac", Value: uci.List(macs...)})
+			if len(macs) == 0 {
+				add(w, "wifi-station", fmt.Sprintf("%sws%d", Prefix, idx), opts)
+				idx++
+				continue
 			}
-			add(w, "wifi-station", fmt.Sprintf("%sws%d", Prefix, idx), opts)
-			idx++
+			for _, mac := range macs {
+				withMAC := append(append([]uci.Option(nil), opts...), uci.Option{Name: "mac", Value: uci.String(mac)})
+				add(w, "wifi-station", fmt.Sprintf("%sws%d", Prefix, idx), withMAC)
+				idx++
+			}
 		}
 	}
 	if len(res.Ledger.DynamicVLAN) == 0 {

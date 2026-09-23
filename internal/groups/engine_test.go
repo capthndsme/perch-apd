@@ -148,7 +148,7 @@ func TestApplyConfirm(t *testing.T) {
 	if _, err := e.Apply(ctx, other); err == nil || err.(*Refusal).Code != "busy" {
 		t.Fatalf("busy: %v", err)
 	}
-	if err := e.Confirm(3); err != nil {
+	if err := e.Confirm(context.Background(), 3); err != nil {
 		t.Fatal(err)
 	}
 	st := e.State(ctx)
@@ -166,7 +166,7 @@ func TestApplyConfirm(t *testing.T) {
 	if got := v.rec.list(); got[len(got)-1] != "wifi reload" {
 		t.Fatalf("reloads %v", got)
 	}
-	if err := e.Confirm(4); err != nil {
+	if err := e.Confirm(context.Background(), 4); err != nil {
 		t.Fatal(err)
 	}
 	// Nothing new: noop, no reload.
@@ -203,7 +203,7 @@ func TestApplyRollsBackWithoutConfirm(t *testing.T) {
 	if st.Pending != nil || st.LastRollback == nil || st.LastRollback.Revision != 3 || st.AppliedRevision != 0 {
 		t.Fatalf("%+v", st)
 	}
-	if err := e.Confirm(3); err == nil {
+	if err := e.Confirm(context.Background(), 3); err == nil {
 		t.Fatal("a rolled back revision confirmed")
 	}
 }
