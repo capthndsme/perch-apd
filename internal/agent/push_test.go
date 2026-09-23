@@ -141,7 +141,7 @@ func TestPushParamsReuseTheBuffer(t *testing.T) {
 	allocs = testing.AllocsPerRun(20, func() {
 		buf = pushParams(buf, text, at, time.Millisecond, 4, ports)
 	})
-	if allocs > 3 {
+	if allocs > 3 && !raceEnabled {
 		t.Fatalf("%v allocations per push with ports", allocs)
 	}
 }
