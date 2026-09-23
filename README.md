@@ -90,6 +90,16 @@ the package restarts it after an apk upgrade (the upgrade to 0.1.2 included; upg
 0.1.1 or older with apk needs `/etc/init.d/perch-apd restart`). Old and new binary take
 flash side by side for a moment: on a 16 MB-flash router, have about 3.5 MB free.
 
+**Release candidates** (tags like `v1.0.0-rc.1`) are GitHub pre-releases. `install.sh`,
+the `…/releases/latest/download/…` links above and the controller's install commands
+resolve to the last final release and never to a release candidate; to try one, use its
+tag's URLs (`…/releases/download/v1.0.0-rc.1/…`, or `PERCH_APD_BASE_URL` for
+`install.sh`). Its packages carry the pre-release in the form apk-tools accepts,
+`1.0.0_rc1` (`perch-apd_1.0.0_rc1-r1_<arch>.ipk` / `.apk`), and `perch-apd --version`
+prints `1.0.0-rc.1`. apk sorts `1.0.0_rc1` below `1.0.0`, so the final release upgrades
+it; opkg sorts it above and answers "Not downgrading", so on 24.10 move from a release
+candidate to the final release with `opkg install --force-downgrade`.
+
 The package installs `/usr/bin/perch-apd` and the same init script and config as
 `--install`, and depends only on `ca-bundle`. It is built by the SDK's Go and linked
 against the router's musl libc (OpenWrt's Go packaging enables cgo), so it is smaller

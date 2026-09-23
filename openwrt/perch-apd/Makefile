@@ -16,11 +16,15 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=perch-apd
-PKG_VERSION:=0.1.2
+PKG_VERSION:=1.0.0_rc1
 PKG_RELEASE:=1
+# PKG_VERSION is in the form both opkg and apk-tools accept: a pre-release is
+# 1.0.0_rc1 (apk rejects 1.0.0-rc.1). PERCH_VERSION is the upstream version,
+# which names the git tag (v1.0.0-rc.1) and is what --version prints.
+PERCH_VERSION:=$(subst _alpha,-alpha.,$(subst _beta,-beta.,$(subst _rc,-rc.,$(subst _pre,-pre.,$(PKG_VERSION)))))
 
 PKG_SOURCE:=perch-apd-$(PKG_VERSION).tar.gz
-PKG_SOURCE_URL:=https://codeload.github.com/capthndsme/perch-apd/tar.gz/v$(PKG_VERSION)?
+PKG_SOURCE_URL:=https://codeload.github.com/capthndsme/perch-apd/tar.gz/v$(PERCH_VERSION)?
 PKG_HASH:=skip
 PKG_BUILD_DIR:=$(BUILD_DIR)/perch-apd-$(PKG_VERSION)
 
@@ -35,7 +39,7 @@ PKG_BUILD_FLAGS:=no-mips16
 GO_PKG:=github.com/capthndsme/perch-apd
 GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/perch-apd
 GO_PKG_LDFLAGS:=-s -w
-GO_PKG_LDFLAGS_X:=$(GO_PKG)/internal/version.Version=$(PKG_VERSION)
+GO_PKG_LDFLAGS_X:=$(GO_PKG)/internal/version.Version=$(PERCH_VERSION)
 
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk

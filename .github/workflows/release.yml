@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v0.1.0: builds every architecture and publishes a GitHub
+# Push a tag like v1.0.0: builds every architecture and publishes a GitHub
 # release whose assets are what install.sh and the dashboard's install
 # commands download (…/releases/latest/download/<asset>).
 on:
@@ -28,7 +28,10 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+        # A tag with a pre-release part (v1.0.0-rc.1) is a GitHub pre-release,
+        # which …/releases/latest (install.sh, the dashboard) never resolves to.
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "perch-apd ${GITHUB_REF_NAME#v}" \
+          pre=; case "$GITHUB_REF_NAME" in *-*) pre=--prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* $pre \
+            --title "Perch AP Daemon ${GITHUB_REF_NAME#v}" \
             --generate-notes
