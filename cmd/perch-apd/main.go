@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/capthndsme/perch-agentkit/hoststat"
 	"github.com/capthndsme/perch-agentkit/rpc"
 	"github.com/capthndsme/perch-apd/internal/agent"
 	"github.com/capthndsme/perch-apd/internal/collect"
@@ -48,6 +49,7 @@ Usage:
   perch-apd metrics     print the Prometheus metrics once
   perch-apd clients     print the associated Wi-Fi clients (JSON)
   perch-apd info        print what the controller sees in system.info (JSON)
+  perch-apd ports       print the Ethernet ports and their link state (JSON)
   perch-apd version
 
 --install and --uninstall work too. Every command takes --config PATH
@@ -57,6 +59,12 @@ Usage:
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
+
+// Where the commands write, and the root `ports` reads (tests swap them).
+var (
+	stdout io.Writer = os.Stdout
+	sysFS            = hoststat.FS{}
+)
 
 func run(args []string) int {
 	cmd := "run"
@@ -123,12 +131,17 @@ func run(args []string) int {
 		if *collectors != "" {
 			names = strings.Split(*collectors, ",")
 		}
-		os.Stdout.Write(d.registry.Gather(ctx, names))
+		stdout.Write(d.registry.Gather(ctx, names))
 	case "clients", "info":
 		d := newDevice(slog.New(slog.NewTextHandler(io.Discard, nil)))
 		defer d.close()
 		var out any
 		if cmd == "info" {
+			// As the daemon answers: no "ports" when the configuration turns
+			// them off (a missing or broken file means the defaults).
+			if cfg, err := config.Load(*cfgPath); err == nil && !cfg.Ports {
+				d.deps.Ports = nil
+			}
 			out = d.deps.SystemInfo(ctx)
 		} else {
 			clients, err := d.wireless.Clients(ctx, "")
@@ -138,13 +151,24 @@ func run(args []string) int {
 			}
 			out = clients
 		}
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		enc.Encode(out)
+	case "ports":
+		// Straight from /sys/class/net and /etc/board.json: no configuration,
+		// no ubus or nl80211, no controller. Safe to run from /tmp on a live AP.
+		ports := sysFS.Ports(hoststat.PortOptions{})
+		if ports == nil {
+			fmt.Fprintln(os.Stderr, "ports: cannot list /sys/class/net")
+			return 1
+		}
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(ports)
 	case "version":
-		fmt.Printf("perch-apd %s (%s)\n", version.Version, version.Arch())
+		fmt.Fprintf(stdout, "perch-apd %s (%s)\n", version.Version, version.Arch())
 	case "help":
-		fmt.Printf(usage, version.Version)
+		fmt.Fprintf(stdout, usage, version.Version)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		fmt.Fprintf(os.Stderr, usage, version.Version)
@@ -170,10 +194,13 @@ type device struct {
 	wireless *wireless.Source
 	locator  *leds.Locator
 	registry *collect.Registry
+	ports    *hoststat.PortReader
 	deps     *handlers.Deps
 }
 
-func newDevice(log *slog.Logger) *device {
+// newDevice opens what the hardware commands use (ubus, nl80211, LEDs). A
+// variable so the tests can see which commands do.
+var newDevice = func(log *slog.Logger) *device {
 	d := &device{locator: leds.New()}
 	d.info = &sysinfo.Info{}
 	d.wireless = &wireless.Source{}
@@ -204,11 +231,13 @@ func newDevice(log *slog.Logger) *device {
 		collect.Wifi{Src: d.wireless},
 		collect.WifiStations{Src: d.wireless},
 	)
+	d.ports = &hoststat.PortReader{FS: fs}
 	d.deps = &handlers.Deps{
 		Log:      log,
 		Wireless: d.wireless,
 		Locator:  d.locator,
 		Info:     d.info,
+		Ports:    d.ports,
 	}
 	if d.ubus != nil {
 		d.deps.Ubus = d.ubus // only a non-nil client: a typed nil would not compare equal to nil
@@ -220,6 +249,21 @@ func (d *device) close() {
 	if d.nl != nil {
 		d.nl.Close()
 	}
+}
+
+// portNames is the log form of a port list.
+func portNames(ports []hoststat.Port) string {
+	switch {
+	case ports == nil:
+		return "unreadable"
+	case len(ports) == 0:
+		return "none"
+	}
+	names := make([]string, len(ports))
+	for i, p := range ports {
+		names[i] = p.Name
+	}
+	return strings.Join(names, ",")
 }
 
 func newLogger(level string) *slog.Logger {
@@ -269,6 +313,9 @@ func runDaemon(ctx context.Context, cfgPath string) int {
 
 	d := newDevice(log)
 	defer d.close()
+	if !cfg.Ports {
+		d.deps.Ports = nil // no "ports" capability either
+	}
 	if restored, err := d.locator.RecoverStale(); restored {
 		log.Info("restored LEDs left blinking by a previous run")
 	} else if err != nil {
@@ -286,7 +333,14 @@ func runDaemon(ctx context.Context, cfgPath string) int {
 		return 0
 	}
 
-	ag, err := agent.New(agent.Options{Config: cfg, Log: log, Dispatcher: disp, Info: d.info, Metrics: d.registry})
+	var ports agent.PortSource // a nil interface when off, not a typed nil
+	if cfg.Ports {
+		ports = d.ports
+		log.Info("reporting the Ethernet ports", "ports", portNames(d.ports.Read()))
+	} else {
+		log.Info("not reporting the Ethernet ports (option ports '0')")
+	}
+	ag, err := agent.New(agent.Options{Config: cfg, Log: log, Dispatcher: disp, Info: d.info, Metrics: d.registry, Ports: ports})
 	if err != nil {
 		log.Error("cannot start the controller session", "err", err)
 		return 1

@@ -3,9 +3,12 @@ package agent
 import (
 	"encoding/json"
 	"math/rand"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/capthndsme/perch-agentkit/hoststat"
 	"github.com/capthndsme/perch-agentkit/rpc"
 )
 
@@ -82,7 +85,7 @@ func TestPushParamsDecodeLikeNotify(t *testing.T) {
 	text := []byte("# HELP node_load1 1m load average.\n# TYPE node_load1 gauge\nnode_load1 0.04\n" +
 		`wifi_network_quality{channel="36",ssid="Caf\xe9 \"5G\""} 70` + "\n")
 	at := time.Date(2026, 9, 22, 4, 5, 6, 789, time.FixedZone("x", 8*3600))
-	params := pushParams(nil, text, at, 1234567*time.Microsecond, 42)
+	params := pushParams(nil, text, at, 1234567*time.Microsecond, 42, nil)
 
 	var got decodedPush
 	if err := json.Unmarshal(params, &got); err != nil {
@@ -124,11 +127,75 @@ func TestPushParamsReuseTheBuffer(t *testing.T) {
 		text = append(text, `wifi_station_receive_bytes_total{ifname="phy0-ap0",mac="02:00:00:00:00:01"} 7366133107`+"\n"...)
 	}
 	at := time.Now()
-	buf := pushParams(nil, text, at, time.Millisecond, 1)
+	buf := pushParams(nil, text, at, time.Millisecond, 1, nil)
 	allocs := testing.AllocsPerRun(20, func() {
-		buf = pushParams(buf, text, at, time.Millisecond, 2)
+		buf = pushParams(buf, text, at, time.Millisecond, 2, nil)
 	})
 	if allocs != 0 {
 		t.Fatalf("%v allocations per push with a reused buffer", allocs)
+	}
+	// With ports: encoding/json writes into the same buffer, which does not
+	// grow again; what is left is the encoder itself.
+	ports := examplePorts()
+	buf = pushParams(buf, text, at, time.Millisecond, 3, ports)
+	allocs = testing.AllocsPerRun(20, func() {
+		buf = pushParams(buf, text, at, time.Millisecond, 4, ports)
+	})
+	if allocs > 3 {
+		t.Fatalf("%v allocations per push with ports", allocs)
+	}
+}
+
+func examplePorts() []hoststat.Port {
+	up, down := true, false
+	speed, changes := 1000, uint64(3)
+	return []hoststat.Port{
+		{Name: "wan", Label: "wan", Role: "wan", Medium: "copper", MAC: "02:00:00:00:00:11", AdminUp: &up, Carrier: &down, Operstate: "down"},
+		{Name: "lan1", Label: "lan1", Role: "lan", Medium: "copper", MAC: "02:00:00:00:00:10", AdminUp: &up, Carrier: &up,
+			Operstate: "up", SpeedMbps: &speed, Duplex: "full", CarrierChanges: &changes},
+	}
+}
+
+func TestPushParamsCarryPorts(t *testing.T) {
+	text := []byte("# TYPE node_load1 gauge\nnode_load1 0.04\n")
+	at := time.Date(2026, 9, 23, 11, 20, 36, 0, time.UTC)
+	ports := examplePorts()
+	params := pushParams(nil, text, at, 14*time.Millisecond, 42, ports)
+	if !json.Valid(params) {
+		t.Fatalf("invalid JSON: %s", params)
+	}
+	// The member as the controller receives it, in report order, ahead of
+	// the text.
+	const member = `,"ports":[` +
+		`{"name":"wan","label":"wan","role":"wan","medium":"copper","mac":"02:00:00:00:00:11","adminUp":true,"carrier":false,"operstate":"down"},` +
+		`{"name":"lan1","label":"lan1","role":"lan","medium":"copper","mac":"02:00:00:00:00:10","adminUp":true,"carrier":true,"operstate":"up","speedMbps":1000,"duplex":"full","carrierChanges":3}` +
+		`],"text":`
+	if !strings.Contains(string(params), member) {
+		t.Fatalf("ports member missing or different:\n%s", params)
+	}
+	var got struct {
+		decodedPush
+		Ports []hoststat.Port `json:"ports"`
+	}
+	if err := json.Unmarshal(params, &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := (decodedPush{"prometheus-text", string(text), "2026-09-23T11:20:36Z", 14, 42}); got.decodedPush != want || !reflect.DeepEqual(got.Ports, ports) {
+		t.Fatalf("decoded %+v", got)
+	}
+
+	// [] means "looked, found none"; nil leaves the member out.
+	for _, tc := range []struct {
+		ports []hoststat.Port
+		want  string // "" = no ports member
+	}{{[]hoststat.Port{}, "[]"}, {nil, ""}} {
+		params := pushParams(nil, text, at, time.Millisecond, 1, tc.ports)
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(params, &m); err != nil {
+			t.Fatalf("%v: %s", err, params)
+		}
+		if raw, ok := m["ports"]; string(raw) != tc.want || ok != (tc.want != "") {
+			t.Fatalf("ports %#v sent as %q (present %v)", tc.ports, raw, ok)
+		}
 	}
 }

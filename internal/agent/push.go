@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"encoding/json"
 	"strconv"
 	"time"
 	"unicode/utf8"
+
+	"github.com/capthndsme/perch-agentkit/hoststat"
 )
 
 // pushParams appends the params of one metrics.push to dst[:0] in a single
@@ -12,16 +15,45 @@ import (
 // compaction rpc.Notification does) copied and scanned the 20-40 KB text three
 // times, which on a MIPS access point cost more than collecting it. The
 // result goes out through link.Session.NotifyRaw.
-func pushParams(dst, text []byte, collectedAt time.Time, took time.Duration, seq uint64) []byte {
+//
+// ports becomes params.ports, marshalled once into the same buffer ahead of
+// the text: nil leaves the member out (the daemon does not report ports, or
+// could not list them), an empty slice sends [] ("looked, found none").
+func pushParams(dst, text []byte, collectedAt time.Time, took time.Duration, seq uint64, ports []hoststat.Port) []byte {
 	b := append(dst[:0], `{"format":"prometheus-text","collectedAt":"`...)
 	b = collectedAt.UTC().AppendFormat(b, time.RFC3339)
 	b = append(b, `","durationMs":`...)
 	b = strconv.AppendInt(b, took.Milliseconds(), 10)
 	b = append(b, `,"seq":`...)
 	b = strconv.AppendUint(b, seq, 10)
+	if ports != nil {
+		b = appendPorts(b, ports)
+	}
 	b = append(b, `,"text":`...)
 	b = appendJSONString(b, text)
 	return append(b, '}')
+}
+
+// appendPorts appends `,"ports":[...]`, with encoding/json writing the array
+// straight into b. On an encoding error (none is possible with Port's field
+// types) the member is left out rather than sent half-written.
+func appendPorts(b []byte, ports []hoststat.Port) []byte {
+	mark := len(b)
+	w := appendWriter{append(b, `,"ports":`...)}
+	enc := json.NewEncoder(&w)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(ports); err != nil {
+		return b[:mark]
+	}
+	return w.b[:len(w.b)-1] // Encode ends the value with a newline
+}
+
+// appendWriter is an io.Writer that appends to a byte slice.
+type appendWriter struct{ b []byte }
+
+func (w *appendWriter) Write(p []byte) (int, error) {
+	w.b = append(w.b, p...)
+	return len(p), nil
 }
 
 const hexDigits = "0123456789abcdef"

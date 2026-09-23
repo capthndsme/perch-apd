@@ -20,6 +20,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/capthndsme/perch-agentkit/hoststat"
 	"github.com/capthndsme/perch-agentkit/link"
 	"github.com/capthndsme/perch-agentkit/rpc"
 	"github.com/capthndsme/perch-apd/internal/config"
@@ -330,10 +331,11 @@ func (f *fakeMetrics) last() []string {
 type pushed struct {
 	at     time.Time
 	params struct {
-		Format      string `json:"format"`
-		Text        string `json:"text"`
-		CollectedAt string `json:"collectedAt"`
-		Seq         int    `json:"seq"`
+		Format      string          `json:"format"`
+		Text        string          `json:"text"`
+		CollectedAt string          `json:"collectedAt"`
+		Seq         int             `json:"seq"`
+		Ports       json.RawMessage `json:"ports"`
 	}
 }
 
@@ -360,6 +362,11 @@ func readPushes(ctx context.Context, t *testing.T, c *websocket.Conn, out chan<-
 
 func newPushAgent(t *testing.T, srvURL string, mets *fakeMetrics, wait time.Duration) *Agent {
 	t.Helper()
+	return newPushAgentWithPorts(t, srvURL, mets, wait, nil)
+}
+
+func newPushAgentWithPorts(t *testing.T, srvURL string, mets *fakeMetrics, wait time.Duration, ports PortSource) *Agent {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "perch-apd")
 	os.WriteFile(path, []byte("config agent 'main'\n\toption controller '"+srvURL+"'\n\toption agent_id 'a'\n\toption agent_secret 'b'\n"), 0o600)
 	cfg, err := config.Load(path)
@@ -372,6 +379,7 @@ func newPushAgent(t *testing.T, srvURL string, mets *fakeMetrics, wait time.Dura
 		Dispatcher: rpc.NewDispatcher(),
 		Info:       &sysinfo.Info{Root: t.TempDir()},
 		Metrics:    mets,
+		Ports:      ports,
 		ConfigWait: wait,
 		Sleep: func(ctx context.Context, d time.Duration) error {
 			<-ctx.Done()
@@ -468,8 +476,75 @@ func TestPushFallsBackWithoutConfigure(t *testing.T) {
 		if p.params.Seq != 1 || strings.Join(mets.last(), ",") != strings.Join(DefaultCollectors, ",") {
 			t.Fatalf("fallback push %+v collectors %v", p.params, mets.last())
 		}
+		if p.params.Ports != nil {
+			t.Fatalf("ports without a port source: %s", p.params.Ports)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("no fallback push")
+	}
+}
+
+type fakePorts struct {
+	mu    sync.Mutex
+	ports []hoststat.Port
+	reads int
+}
+
+func (f *fakePorts) Read() []hoststat.Port {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reads++
+	return f.ports
+}
+
+func (f *fakePorts) set(ports []hoststat.Port) {
+	f.mu.Lock()
+	f.ports = ports
+	f.mu.Unlock()
+}
+
+// Every push carries the ports as read at that push: inventory and state
+// together, [] when the source found none.
+func TestPushesCarryPorts(t *testing.T) {
+	fc := &fakeController{t: t}
+	pushes := make(chan pushed, 8)
+	fc.onSession = func(ctx context.Context, c *websocket.Conn) {
+		go readPushes(ctx, t, c, pushes)
+		c.Write(ctx, websocket.MessageText, []byte(`{"jsonrpc":"2.0","method":"agent.configure","params":{"metricsIntervalSeconds":1}}`))
+		<-ctx.Done()
+	}
+	srv := httptest.NewServer(fc.handler())
+	defer srv.Close()
+	up, down := true, false
+	src := &fakePorts{ports: []hoststat.Port{
+		{Name: "wan", Label: "wan", Role: "wan", Medium: "copper", MAC: "02:00:00:00:00:11", AdminUp: &up, Carrier: &down, Operstate: "down"},
+		{Name: "lan1", Label: "lan1", Role: "lan", Medium: "copper", MAC: "02:00:00:00:00:10", AdminUp: &up, Carrier: &up, Operstate: "up"},
+	}}
+	a := newPushAgentWithPorts(t, srv.URL, &fakeMetrics{}, time.Hour, src)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { a.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	next := func() pushed {
+		t.Helper()
+		select {
+		case p := <-pushes:
+			return p
+		case <-time.After(3 * time.Second):
+			t.Fatal("no push")
+		}
+		return pushed{}
+	}
+	p := next()
+	want := `[{"name":"wan","label":"wan","role":"wan","medium":"copper","mac":"02:00:00:00:00:11","adminUp":true,"carrier":false,"operstate":"down"},` +
+		`{"name":"lan1","label":"lan1","role":"lan","medium":"copper","mac":"02:00:00:00:00:10","adminUp":true,"carrier":true,"operstate":"up"}]`
+	if string(p.params.Ports) != want || !strings.Contains(p.params.Text, "node_load1") {
+		t.Fatalf("first push ports %s", p.params.Ports)
+	}
+	src.set([]hoststat.Port{})
+	if p := next(); string(p.params.Ports) != "[]" {
+		t.Fatalf("push after the ports went away: %s", p.params.Ports)
 	}
 }
 

@@ -7,7 +7,9 @@ static binary per OpenWrt access point that
    and associated stations (from nl80211, the same kernel calls iwinfo makes), network
    counters, CPU, memory and conntrack with the lua exporter's metric names and labels,
    and **pushes** them to the Perch Network Controller on the interval the controller sets. It also
-   fills the per-station byte counters the lua exporter declares but never emits.
+   fills the per-station byte counters the lua exporter declares but never emits, and sends
+   the AP's Ethernet ports with their link state (which socket has a cable, at what speed)
+   for the controller's infrastructure view.
 2. **bridges the AP to the Perch Network Controller** on the same WebSocket.
    Through it the dashboard can kick or steer a client, blink the AP's LEDs to find it on
    a shelf, and reboot it, without SSH keys on the server.
@@ -150,6 +152,7 @@ joins, and keeps its history.
 | `agent_id`, `agent_secret` | | issued by the controller; forgetting the agent in the dashboard revokes them |
 | `tls_insecure` | `0` | accept a self-signed certificate |
 | `ca_file` | | extra CA bundle (PEM) for a private CA |
+| `ports` | `1` | send the Ethernet ports and their link state with every push; `0` leaves them out |
 | `log_level` | `info` | `debug`, `info`, `warn`, `error` |
 
 How often metrics are pushed is not configured here: the server sends it (the AP's poll
@@ -168,22 +171,29 @@ perch-apd run                     the daemon (what the init script starts)
 perch-apd metrics [--collect wifi,netdev]   print the metrics once
 perch-apd clients                 associated Wi-Fi clients, JSON
 perch-apd info                    what the controller sees (system.info), JSON
+perch-apd ports                   the Ethernet ports and their link state, JSON (reads /sys only)
 perch-apd version
 ```
 
 ## Over the WebSocket
 
-The daemon pushes `metrics.push` (the Prometheus text) every interval the controller
-set with `agent.configure`. The controller can call:
+The daemon pushes `metrics.push` (the Prometheus text, plus the Ethernet ports unless
+`option ports '0'`) every interval the controller set with `agent.configure`. The
+controller can call:
 
 | Method | Does |
 |---|---|
-| `system.info` | model, release, kernel, radios, interfaces, capabilities |
+| `system.info` | model, release, kernel, radios, interfaces, capabilities (`ports` when the pushes carry them) |
 | `clients.list` | associated stations with signal, rates, bytes, connected time |
 | `client.kick` | `ubus call hostapd.<ifname> del_client` (optional ban time = steering) |
 | `locate.start` / `locate.stop` | blink every LED, then restore each LED's trigger and settings |
 | `system.reboot` | reboot after answering |
 | `ping` | round trip |
+
+The ports are what `perch-apd ports` prints: the switch ports (not the switch's CPU
+port), per-port netdevs and a separate WAN MAC, but no bridges, VLANs or Wi-Fi
+interfaces. They come in the order of the case, with `wan` / `lan` roles from
+`/etc/board.json`. A WAN socket used as a LAN uplink stays `wan`.
 
 Pushes are compressed (permessage-deflate, about 7× smaller) when the controller
 enables it: Perch Network Controller newer than 0.2.0. With an older controller the

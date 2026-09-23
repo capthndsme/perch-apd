@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/capthndsme/perch-agentkit/hoststat"
 	"github.com/capthndsme/perch-agentkit/rpc"
 	"github.com/capthndsme/perch-apd/internal/leds"
 	"github.com/capthndsme/perch-apd/internal/nl80211"
@@ -230,6 +231,36 @@ func TestSystemInfoAndCapabilities(t *testing.T) {
 	ub.hostapd = nil
 	if caps := strings.Join(d.Capabilities(context.Background()), ","); caps != "metrics,clients,locate,reboot" {
 		t.Fatalf("caps without hostapd: %s", caps)
+	}
+}
+
+type fakePorts []hoststat.Port
+
+func (f fakePorts) Read() []hoststat.Port { return f }
+
+// "ports" only when the pushes carry ports and the device has at least one.
+func TestPortsCapability(t *testing.T) {
+	d, _, disp := newDeps(t)
+	base := "metrics,clients,kick,locate,reboot"
+	for _, tc := range []struct {
+		name  string
+		ports PortReader
+		want  string
+	}{
+		{"reporting off", nil, base},
+		{"cannot list", fakePorts(nil), base},
+		{"no ports", fakePorts{}, base},
+		{"ports", fakePorts{{Name: "lan1"}}, base + ",ports"},
+	} {
+		d.Ports = tc.ports
+		if caps := strings.Join(d.Capabilities(context.Background()), ","); caps != tc.want {
+			t.Errorf("%s: %s", tc.name, caps)
+		}
+	}
+	r := invoke(t, disp, "system.info", "")
+	var info SystemInfo
+	if err := json.Unmarshal(r.Result, &info); err != nil || strings.Join(info.Capabilities, ",") != base+",ports" {
+		t.Fatalf("system.info capabilities %v %v", info.Capabilities, err)
 	}
 }
 

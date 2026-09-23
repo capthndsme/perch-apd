@@ -12,7 +12,7 @@ func TestLoadDefaultsAndMissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.Enabled || c.Controller != "" || c.LogLevel != "info" || c.HasCredentials() {
+	if !c.Enabled || c.Controller != "" || c.LogLevel != "info" || c.HasCredentials() || !c.Ports {
 		t.Fatalf("defaults = %+v", c)
 	}
 
@@ -24,8 +24,31 @@ func TestLoadDefaultsAndMissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.Enabled || c.Controller != "" || c.JoinToken != "" || c.TLSInsecure {
+	if !c.Enabled || c.Controller != "" || c.JoinToken != "" || c.TLSInsecure || !c.Ports {
 		t.Fatalf("default file = %+v", c)
+	}
+	if !strings.Contains(string(DefaultFile), "\toption ports '1'\n") {
+		t.Fatal("the default file does not show option ports")
+	}
+}
+
+// Port reporting is on unless the file turns it off; a config written before
+// the option existed keeps it on.
+func TestPortsOption(t *testing.T) {
+	for value, want := range map[string]bool{"": true, "'1'": true, "'0'": false, "'off'": false, "'no'": false, "'bogus'": true} {
+		text := "config agent 'main'\n\toption enabled '1'\n"
+		if value != "" {
+			text += "\toption ports " + value + "\n"
+		}
+		path := filepath.Join(t.TempDir(), "perch-apd")
+		os.WriteFile(path, []byte(text), 0o600)
+		c, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Ports != want {
+			t.Errorf("option ports %s: Ports=%v, want %v", value, c.Ports, want)
+		}
 	}
 }
 

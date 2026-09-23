@@ -38,6 +38,8 @@ type Config struct {
 	TLSInsecure bool
 	CAFile      string
 	LogLevel    string
+	// Ports: send the Ethernet ports with every push (option ports, default on).
+	Ports bool
 }
 
 // HasCredentials reports whether the agent has joined a controller.
@@ -64,6 +66,7 @@ func Load(path string) (*Config, error) {
 		TLSInsecure: parseBool(get("tls_insecure", "0"), false),
 		CAFile:      get("ca_file", ""),
 		LogLevel:    get("log_level", "info"),
+		Ports:       parseBool(get("ports", "1"), true),
 	}
 	if raw := get("controller", ""); raw != "" {
 		u, err := NormalizeControllerURL(raw)

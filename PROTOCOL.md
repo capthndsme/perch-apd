@@ -201,7 +201,7 @@ calls `system.info`.
   "arch": "mipsle",
   "uptimeSeconds": 193172,
   "macs": ["02:00:00:00:00:10", "02:00:00:00:00:11"],
-  "capabilities": ["metrics", "clients", "kick", "locate", "reboot"],
+  "capabilities": ["metrics", "clients", "kick", "locate", "reboot", "ports"],
   "radios": [
     {"name": "radio0", "band": "2g", "channel": 6, "htmode": "HE20", "country": "PH", "up": true}
   ],
@@ -215,8 +215,10 @@ calls `system.info`.
 `capabilities` lists what this build **and** this device can do right now:
 `metrics` (pushes, §2.3) always; `clients` when nl80211 is reachable; `kick` when hostapd
 exposes `hostapd.<ifname>` on ubus; `locate` when `/sys/class/leds` has LEDs;
-`reboot` on OpenWrt. `band` in `interfaces` is `2.4`, `5`, `6` or `60` (the
-server's convention); `band` in `radios` is UCI's (`2g`, `5g`, `6g`, `60g`).
+`reboot` on OpenWrt; `ports` (1.0.0 and later) when the pushes carry the Ethernet ports
+(`option ports '1'`, the default) and the device has at least one. `band` in
+`interfaces` is `2.4`, `5`, `6` or `60` (the server's convention); `band` in `radios`
+is UCI's (`2g`, `5g`, `6g`, `60g`).
 
 #### `clients.list` → associated stations, live
 
@@ -302,7 +304,12 @@ default collectors.
 {"jsonrpc":"2.0","method":"metrics.push",
  "params":{"format":"prometheus-text",
            "text":"# TYPE node_load1 gauge\nnode_load1 0.04\n…",
-           "collectedAt":"2026-09-21T11:20:36Z","durationMs":14,"seq":42}}
+           "collectedAt":"2026-09-21T11:20:36Z","durationMs":14,"seq":42,
+           "ports":[
+             {"name":"wan","label":"wan","role":"wan","medium":"copper","mac":"02:00:00:00:00:11",
+              "adminUp":true,"carrier":false,"operstate":"down","carrierChanges":2},
+             {"name":"lan1","label":"lan1","role":"lan","medium":"copper","mac":"02:00:00:00:00:10",
+              "adminUp":true,"carrier":true,"operstate":"up","speedMbps":1000,"duplex":"full","carrierChanges":3}]}}
 ```
 
 `text` uses node_exporter-lua's metric names and labels, so the server's
@@ -314,6 +321,33 @@ sent by the client (client upload). `collectedAt` is the agent's clock (for
 logs only; the server places data by its own receive time). `seq` counts pushes
 since the agent started. The server may drop a push that arrives early or while
 the AP is disabled; nothing is resent.
+
+`ports` (1.0.0 and later) lists the AP's Ethernet ports with their link state, on
+every push, so inventory and state always travel together. It is the array the Perch
+Network Collector reports as `gateway.ports`, made by the same code
+([perch-agentkit](https://github.com/capthndsme/perch-agentkit) `hoststat`, from
+`/sys/class/net` and `/etc/board.json`). A port is a DSA user port (not the switch's CPU
+conduit), a per-port netdev or a second MAC used as WAN; bridges, VLANs, bonds, Wi-Fi
+interfaces, tunnels and the like are not. **Absent** means the agent does not report
+ports (`option ports '0'`, `/sys/class/net` unreadable, or a version before 1.0.0);
+**`[]`** means it looked and found none. The order is the display order: WAN first,
+then the board's LAN order, then the rest in natural order (`lan2` before `lan10`); at
+most 64 entries. A field the kernel does not answer is left out.
+
+| Field | |
+|---|---|
+| `name` | the netdev (`lan1`, `wan`, `eth1`): the port's key |
+| `label` | the board's label for the socket (devicetree), else the name |
+| `role` | `wan` or `lan` as `/etc/board.json` names the port; absent when it does not. A WAN socket used as a LAN uplink (bridged) stays `wan` |
+| `medium` | `copper`, `sfp` (an SFP cage in the devicetree), `virtual` (a veth, or a paravirtual NIC such as virtio), `wireless` (an LTE modem) |
+| `mac` | the interface's MAC; DSA user ports share their switch's |
+| `adminUp` | administratively up |
+| `carrier` | a link is detected; absent while the port is administratively down |
+| `operstate` | the kernel's word: `up`, `down`, `lowerlayerdown` (a switch port with no cable), … |
+| `speedMbps`, `duplex` | the negotiated link (`duplex` `full` or `half`); absent without a link |
+| `carrierChanges` | link changes since the interface came up |
+
+An older controller ignores `ports` (it reads only `format`, `text` and `durationMs`).
 
 ### 2.4 Other notifications the agent sends
 

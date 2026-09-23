@@ -23,6 +23,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/capthndsme/perch-agentkit/hoststat"
 	"github.com/capthndsme/perch-agentkit/link"
 	"github.com/capthndsme/perch-agentkit/rpc"
 	"github.com/capthndsme/perch-apd/internal/config"
@@ -59,6 +60,12 @@ var DefaultCollectors = []string{"openwrt", "uname", "stat", "loadavg", "meminfo
 // MetricsSource renders the Prometheus text of the named collectors.
 type MetricsSource interface {
 	Gather(ctx context.Context, names []string) []byte
+}
+
+// PortSource lists the device's Ethernet ports (a hoststat.PortReader): nil
+// when they cannot be listed, empty when there are none.
+type PortSource interface {
+	Read() []hoststat.Port
 }
 
 // PushConfig is the schedule agent.configure sets.
@@ -198,6 +205,9 @@ type Options struct {
 	OnJoined func(*JoinResponse)
 	// Metrics is pushed on the controller's schedule (nil = never push).
 	Metrics MetricsSource
+	// Ports is read on every push and sent as params.ports (nil = pushes
+	// carry no ports: option ports '0').
+	Ports PortSource
 	// ConfigWait is how long to wait for agent.configure before pushing with
 	// the defaults (tests shorten it).
 	ConfigWait time.Duration
@@ -213,6 +223,7 @@ type Agent struct {
 	sleep func(ctx context.Context, d time.Duration) error
 	onJ   func(*JoinResponse)
 	mets  MetricsSource
+	ports PortSource
 	wait  time.Duration
 
 	mu   sync.Mutex
@@ -245,7 +256,7 @@ func New(o Options) (*Agent, error) {
 		disp = rpc.NewDispatcher()
 	}
 	return &Agent{cfg: o.Config, log: log, disp: disp, info: o.Info, http: client, sleep: sleep,
-		onJ: o.OnJoined, mets: o.Metrics, wait: wait}, nil
+		onJ: o.OnJoined, mets: o.Metrics, ports: o.Ports, wait: wait}, nil
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
@@ -494,7 +505,11 @@ func (a *Agent) session(ctx context.Context) error {
 					gctx, cancel := context.WithTimeout(pctx, collectTimeout)
 					text := a.mets.Gather(gctx, names)
 					cancel()
-					params = pushParams(params, text, start, time.Since(start), seq)
+					var ports []hoststat.Port
+					if a.ports != nil {
+						ports = a.ports.Read()
+					}
+					params = pushParams(params, text, start, time.Since(start), seq, ports)
 					err := s.NotifyRaw("metrics.push", params)
 					if err != nil && pctx.Err() == nil {
 						a.log.Debug("metrics push not sent", "err", err)

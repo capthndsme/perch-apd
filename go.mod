@@ -3,7 +3,7 @@ module github.com/capthndsme/perch-apd
 go 1.22
 
 require (
-	github.com/capthndsme/perch-agentkit v0.1.0
+	github.com/capthndsme/perch-agentkit v0.2.0
 	github.com/coder/websocket v1.8.13
 	github.com/mdlayher/genetlink v1.3.2
 	github.com/mdlayher/netlink v1.7.2

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/capthndsme/perch-agentkit/hoststat"
 	"github.com/capthndsme/perch-agentkit/rpc"
 	"github.com/capthndsme/perch-apd/internal/leds"
 	"github.com/capthndsme/perch-apd/internal/sysinfo"
@@ -32,6 +33,11 @@ type Ubus interface {
 	Available() bool
 }
 
+// PortReader lists the device's Ethernet ports (a hoststat.PortReader).
+type PortReader interface {
+	Read() []hoststat.Port
+}
+
 // Deps are the handlers' collaborators.
 type Deps struct {
 	Log      *slog.Logger
@@ -39,6 +45,9 @@ type Deps struct {
 	Ubus     Ubus // nil off OpenWrt
 	Locator  *leds.Locator
 	Info     *sysinfo.Info
+	// Ports is set when the pushes carry the Ethernet ports (nil with
+	// option ports '0').
+	Ports PortReader
 	// Reboot reboots the device; nil = `reboot`.
 	Reboot func() error
 	Now    func() time.Time
@@ -144,6 +153,9 @@ func (d *Deps) Capabilities(ctx context.Context) []string {
 	}
 	if d.Info != nil && d.Info.IsOpenWrt() {
 		caps = append(caps, "reboot")
+	}
+	if d.Ports != nil && len(d.Ports.Read()) > 0 {
+		caps = append(caps, "ports")
 	}
 	return caps
 }
