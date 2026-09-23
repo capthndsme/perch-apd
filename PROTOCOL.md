@@ -277,6 +277,44 @@ Params: `{"delaySeconds": 2}` (0–60, default 2). The agent answers
 → `{"pong": true, "time": "2026-09-21T11:20:36.123Z"}`. Used to measure the
 round trip.
 
+#### `groups.apply` / `groups.confirm` / `groups.state` → device groups on the AP
+
+Only with `option wifi_groups '1'` (capability `wifi_groups`; over plain `ws://` also
+`option wifi_groups_insecure '1'`, else `-32001` with `data.error` `insecure_transport`).
+The controller's device groups (controller `docs/gateway/device-groups.md` section 7): the
+groups' passphrases and MAC bindings on the listed SSIDs, and the VLANs they land in,
+carried tagged to the gateway over the trunk port.
+
+```json
+{"revision":7,"confirmSeconds":120,"trunk":"auto","ssids":["Apartment"],
+ "vlans":[{"vid":101},{"vid":102}],
+ "stations":[{"key":"<group passphrase>","vid":101},{"vid":102,"macs":["02:00:00:00:00:21"]}]}
+```
+
+A station without `key` is a binding: the MACs keep the SSID's own passphrase but land in
+the VLAN (`wifi-station` with `mac`). The agent writes only its own sections (`perch_*`)
+plus `dynamic_vlan '1'` on the managed `wifi-iface`s; a trunk port inside an untagged bridge
+converts that bridge to VLAN filtering (its interfaces move to `<bridge>.1`). What it changed
+in sections it does not own is recorded and put back when no longer needed. `trunk: "auto"`
+is the bridge port behind which the default gateway's MAC is learned
+(`/sys/class/net/<bridge>/brforward`), or the default route's own port.
+
+Result: `{revision, state: "pending_confirm" | "noop", deadline, trunkPort, bridge, converted,
+managed[], issues[]}`. The same revision again answers the same; another one while an apply
+waits is `busy`. Unless `groups.confirm {revision}` arrives before `deadline`
+(`confirmSeconds`, 30-600, default 120) the agent restores the previous `wireless` and
+`network` byte for byte and reloads (also at start when the window passed while it was down).
+Refusals (`-32000`, `data.error`): `no_managed_iface`, `trunk_unknown`, `uncommitted`
+(changes staged in LuCI), `busy`, `apply_failed`, `not_pending`; `-32602` `bad_params`.
+
+`groups.state` → `{appliedRevision, pending: {revision, deadline} | null, lastRollback?,
+trunkPort, stations: [{mac, vid, ifname}], issues[]}`: `stations` are the clients on group
+VLANs (AP_VLAN interfaces `<ifname>-g<vid>`).
+
+Reloads: the network (`/etc/init.d/network reload`) when the network config changed, else
+`wifi reload` (new keys and bindings reach hostapd's PSK list without dropping clients).
+After a binding the controller kicks the client (`client.kick`) so it rejoins in its VLAN.
+
 ### 2.3 Metrics: pushed by the agent
 
 **Server → agent: `agent.configure`** (notification), the first frame of every
@@ -364,7 +402,9 @@ do not know with -32601.
   can connect to it.
 - The agent executes a fixed set of methods. There is no remote shell: a
   compromised controller can kick clients, blink LEDs and reboot APs, nothing
-  more.
+  more. With `option wifi_groups '1'` it can also add Wi-Fi passphrases and
+  VLANs to the listed SSIDs (Perch's own sections only, rolled back unless
+  confirmed): leave it off on APs that carry no device groups.
 - Join tokens are stored hashed (and encrypted with `APP_KEY` so an admin can
   show one again). Agent secrets are stored as SHA-256 hashes.
 - Failed joins and failed WebSocket authentications are rate-limited per

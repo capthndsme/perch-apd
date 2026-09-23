@@ -40,6 +40,11 @@ type Config struct {
 	LogLevel    string
 	// Ports: send the Ethernet ports with every push (option ports, default on).
 	Ports bool
+	// WifiGroups lets the controller put device groups' Wi-Fi keys, bindings
+	// and VLANs on this AP (option wifi_groups, default off).
+	WifiGroups bool
+	// WifiGroupsInsecure allows that over a plain ws:// controller too.
+	WifiGroupsInsecure bool
 }
 
 // HasCredentials reports whether the agent has joined a controller.
@@ -67,6 +72,9 @@ func Load(path string) (*Config, error) {
 		CAFile:      get("ca_file", ""),
 		LogLevel:    get("log_level", "info"),
 		Ports:       parseBool(get("ports", "1"), true),
+
+		WifiGroups:         parseBool(get("wifi_groups", "0"), false),
+		WifiGroupsInsecure: parseBool(get("wifi_groups_insecure", "0"), false),
 	}
 	if raw := get("controller", ""); raw != "" {
 		u, err := NormalizeControllerURL(raw)

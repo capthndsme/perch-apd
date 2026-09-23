@@ -27,6 +27,7 @@ import (
 	"github.com/capthndsme/perch-apd/internal/agent"
 	"github.com/capthndsme/perch-apd/internal/collect"
 	"github.com/capthndsme/perch-apd/internal/config"
+	"github.com/capthndsme/perch-apd/internal/groups"
 	"github.com/capthndsme/perch-apd/internal/handlers"
 	"github.com/capthndsme/perch-apd/internal/install"
 	"github.com/capthndsme/perch-apd/internal/leds"
@@ -34,6 +35,8 @@ import (
 	"github.com/capthndsme/perch-apd/internal/sysinfo"
 	"github.com/capthndsme/perch-apd/internal/version"
 	"github.com/capthndsme/perch-apd/internal/wireless"
+	"os/exec"
+	"regexp"
 )
 
 const usage = `perch-apd %s: Perch AP Daemon
@@ -245,6 +248,59 @@ var newDevice = func(log *slog.Logger) *device {
 	return d
 }
 
+// newGroupsEngine wires the device groups engine to the real files, the
+// reload commands and nl80211's AP_VLAN interfaces.
+func newGroupsEngine(d *device, log *slog.Logger) (*groups.Engine, error) {
+	return groups.New(groups.Options{
+		StateDir:     "/etc/perch-apd/groups",
+		WirelessPath: "/etc/config/wireless",
+		NetworkPath:  "/etc/config/network",
+		FS:           groups.FS{Root: "/"},
+		Run: func(ctx context.Context, name string, args ...string) error {
+			out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("%s: %v: %s", name, err, strings.TrimSpace(string(out)))
+			}
+			return nil
+		},
+		Stations: func() ([]groups.StationSeen, error) { return groupStations(d.nl) },
+		Log:      log,
+	})
+}
+
+var groupVLANName = regexp.MustCompile(`-g([0-9]{1,4})$`)
+
+// groupStations lists the stations hostapd moved to group VLANs (AP_VLAN
+// interfaces named <ifname>-g<vid>).
+func groupStations(nl *nl80211.Client) ([]groups.StationSeen, error) {
+	out := []groups.StationSeen{}
+	if nl == nil {
+		return out, nil
+	}
+	ifaces, err := nl.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	for _, ifi := range ifaces {
+		if ifi.Type != nl80211.IfTypeAPVLAN {
+			continue
+		}
+		m := groupVLANName.FindStringSubmatch(ifi.Name)
+		if m == nil {
+			continue
+		}
+		vid, _ := strconv.Atoi(m[1])
+		stas, err := nl.Stations(ifi.Index)
+		if err != nil {
+			continue
+		}
+		for _, s := range stas {
+			out = append(out, groups.StationSeen{MAC: s.MAC.String(), VID: vid, Ifname: ifi.Name})
+		}
+	}
+	return out, nil
+}
+
 func (d *device) close() {
 	if d.nl != nil {
 		d.nl.Close()
@@ -322,6 +378,22 @@ func runDaemon(ctx context.Context, cfgPath string) int {
 		log.Warn("restoring LEDs from a previous run", "err", err)
 	}
 	defer d.locator.Stop()
+
+	if cfg.WifiGroups {
+		eng, err := newGroupsEngine(d, log)
+		if err != nil {
+			log.Error("device groups are off: the engine did not start", "err", err)
+		} else {
+			eng.Start(ctx)
+			d.deps.Groups = eng
+			if !strings.HasPrefix(cfg.Controller, "https://") && !cfg.WifiGroupsInsecure {
+				d.deps.GroupsRefusal = "device groups over a plain http:// controller need option wifi_groups_insecure '1'"
+				log.Warn(d.deps.GroupsRefusal)
+			} else {
+				log.Info("device groups on: the controller may put group keys and VLANs on this AP")
+			}
+		}
+	}
 
 	disp := rpc.NewDispatcher()
 	handlers.Register(disp, d.deps)

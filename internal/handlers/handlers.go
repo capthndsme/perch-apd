@@ -17,6 +17,7 @@ import (
 	"github.com/capthndsme/perch-agentkit/hoststat"
 	"github.com/capthndsme/perch-agentkit/openwrt/ubus"
 	"github.com/capthndsme/perch-agentkit/rpc"
+	"github.com/capthndsme/perch-apd/internal/groups"
 	"github.com/capthndsme/perch-apd/internal/leds"
 	"github.com/capthndsme/perch-apd/internal/sysinfo"
 	"github.com/capthndsme/perch-apd/internal/version"
@@ -51,6 +52,11 @@ type Deps struct {
 	// Reboot reboots the device; nil = `reboot`.
 	Reboot func() error
 	Now    func() time.Time
+	// Groups puts device groups on the AP (nil = option wifi_groups '0').
+	Groups *groups.Engine
+	// GroupsRefusal: why groups.apply is refused although Groups is set
+	// (plain ws:// without wifi_groups_insecure), "" = allowed.
+	GroupsRefusal string
 }
 
 func (d *Deps) now() time.Time {
@@ -69,6 +75,70 @@ func Register(disp *rpc.Dispatcher, d *Deps) {
 	disp.Register("locate.stop", d.locateStop)
 	disp.Register("system.reboot", d.systemReboot)
 	disp.Register("ping", d.ping)
+	disp.Register("groups.apply", d.groupsApply)
+	disp.Register("groups.confirm", d.groupsConfirm)
+	disp.Register("groups.state", d.groupsState)
+}
+
+// groupsError maps a groups refusal onto the protocol's errors.
+func groupsError(err error) error {
+	var r *groups.Refusal
+	if errors.As(err, &r) {
+		code := rpc.CodeCommandFailed
+		if r.Code == "bad_params" {
+			code = rpc.CodeInvalidParams
+		}
+		return &rpc.Error{Code: code, Message: r.Message, Data: map[string]string{"error": r.Code}}
+	}
+	return err
+}
+
+func (d *Deps) groupsEnabled() error {
+	if d.Groups == nil {
+		return rpc.Errorf(rpc.CodeUnsupported, "device groups are off on this AP (option wifi_groups '0')")
+	}
+	if d.GroupsRefusal != "" {
+		return &rpc.Error{Code: rpc.CodeUnsupported, Message: d.GroupsRefusal, Data: map[string]string{"error": "insecure_transport"}}
+	}
+	return nil
+}
+
+func (d *Deps) groupsApply(ctx context.Context, raw json.RawMessage) (any, error) {
+	if err := d.groupsEnabled(); err != nil {
+		return nil, err
+	}
+	var p groups.Desired
+	if err := rpc.Params(raw, &p); err != nil {
+		return nil, err
+	}
+	res, err := d.Groups.Apply(ctx, p)
+	if err != nil {
+		return nil, groupsError(err)
+	}
+	return res, nil
+}
+
+func (d *Deps) groupsConfirm(ctx context.Context, raw json.RawMessage) (any, error) {
+	if err := d.groupsEnabled(); err != nil {
+		return nil, err
+	}
+	var p struct {
+		Revision int64 `json:"revision"`
+	}
+	if err := rpc.Params(raw, &p); err != nil {
+		return nil, err
+	}
+	if err := d.Groups.Confirm(p.Revision); err != nil {
+		return nil, groupsError(err)
+	}
+	return map[string]any{"revision": p.Revision, "state": "applied"}, nil
+}
+
+func (d *Deps) groupsState(ctx context.Context, _ json.RawMessage) (any, error) {
+	if d.Groups == nil {
+		return nil, rpc.Errorf(rpc.CodeUnsupported, "device groups are off on this AP (option wifi_groups '0')")
+	}
+	return d.Groups.State(ctx), nil
 }
 
 // SystemInfo is the result of system.info.
@@ -156,6 +226,9 @@ func (d *Deps) Capabilities(ctx context.Context) []string {
 	}
 	if d.Ports != nil && len(d.Ports.Read()) > 0 {
 		caps = append(caps, "ports")
+	}
+	if d.Groups != nil && d.GroupsRefusal == "" {
+		caps = append(caps, "wifi_groups")
 	}
 	return caps
 }
