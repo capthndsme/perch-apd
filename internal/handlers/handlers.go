@@ -88,7 +88,11 @@ func groupsError(err error) error {
 		if r.Code == "bad_params" {
 			code = rpc.CodeInvalidParams
 		}
-		return &rpc.Error{Code: code, Message: r.Message, Data: map[string]string{"error": r.Code}}
+		data := map[string]string{"error": r.Code}
+		if r.Reason != "" {
+			data["reason"] = r.Reason // busy: groups_pending, plane_pending, update_pending, luci_pending
+		}
+		return &rpc.Error{Code: code, Message: r.Message, Data: data}
 	}
 	return err
 }

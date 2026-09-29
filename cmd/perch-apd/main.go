@@ -25,6 +25,7 @@ import (
 	"github.com/capthndsme/perch-agentkit/openwrt/ubus"
 	"github.com/capthndsme/perch-agentkit/rpc"
 	"github.com/capthndsme/perch-apd/internal/agent"
+	"github.com/capthndsme/perch-apd/internal/applylock"
 	"github.com/capthndsme/perch-apd/internal/collect"
 	"github.com/capthndsme/perch-apd/internal/config"
 	"github.com/capthndsme/perch-apd/internal/groups"
@@ -199,12 +200,15 @@ type device struct {
 	registry *collect.Registry
 	ports    *hoststat.PortReader
 	deps     *handlers.Deps
+	// applyLock is the AP's one write lock: device groups, the Wi-Fi config
+	// plane and agent updates each hold it through their confirm window.
+	applyLock *applylock.Lock
 }
 
 // newDevice opens what the hardware commands use (ubus, nl80211, LEDs). A
 // variable so the tests can see which commands do.
 var newDevice = func(log *slog.Logger) *device {
-	d := &device{locator: leds.New()}
+	d := &device{locator: leds.New(), applyLock: applylock.New()}
 	d.info = &sysinfo.Info{}
 	d.wireless = &wireless.Source{}
 	if ub := ubus.New(); ub.Available() {
@@ -253,6 +257,7 @@ var newDevice = func(log *slog.Logger) *device {
 func newGroupsEngine(d *device, log *slog.Logger) (*groups.Engine, error) {
 	return groups.New(groups.Options{
 		StateDir:     "/etc/perch-apd/groups",
+		Lock:         d.applyLock,
 		WirelessPath: "/etc/config/wireless",
 		NetworkPath:  "/etc/config/network",
 		FS:           groups.FS{Root: "/"},

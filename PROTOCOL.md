@@ -294,16 +294,28 @@ carried tagged to the gateway over the trunk port.
 A station without `key` is a binding: the MACs keep the SSID's own passphrase but land in
 the VLAN, one `wifi-station` per MAC with a single `option mac` (OpenWrt 24.10 reads `mac` as a
 string and drops a `list`; 25.12 splits the option into its array). A group key equal to a
-managed interface's own passphrase is skipped with an issue. The agent writes only its own sections (`perch_*`)
-plus `dynamic_vlan '1'` on the managed `wifi-iface`s; a trunk port inside an untagged bridge
+managed interface's own passphrase is skipped with an issue. The agent writes only the sections it
+creates plus `dynamic_vlan '1'` on the managed `wifi-iface`s; a trunk port inside an untagged bridge
 converts that bridge to VLAN filtering (its interfaces move to `<bridge>.1`). What it changed
-in sections it does not own is recorded and put back when no longer needed. `trunk: "auto"`
+in sections it does not own is recorded and put back when no longer needed.
+The names it creates are `perch_ws<n>`, `perch_wv<vid>_<iface>`, `perch_v<vid>`, `perch_bv<vid>`,
+`perch_bvu`, `perch_dv<vid>`, `perch_bd<vid>`; its state records which ones it created, and each apply
+removes exactly those (a state written before 1.2 falls back to these patterns). Any other section,
+including other `perch_*` ones (the Wi-Fi config plane's `perch_n*`), is never removed or changed. A
+VLAN another section already carries on the bridge is used as it is (an issue says so, and another if
+the trunk port is not a tagged member of it); a converted bridge stays converted while it carries a
+VLAN the groups did not create. A section of one of these names that the groups did not create
+refuses the apply with `name_taken`. `trunk: "auto"`
 is the bridge port behind which the default gateway's MAC is learned
 (`/sys/class/net/<bridge>/brforward`), or the default route's own port.
 
 Result: `{revision, state: "pending_confirm" | "noop", deadline, trunkPort, bridge, converted,
 managed[], issues[]}`. The same revision again answers the same; another one while an apply
-waits is `busy`. Unless `groups.confirm {revision}` arrives before `deadline`
+waits is `busy` with `data.reason` `groups_pending`. An apply holds the AP's one write lock from
+its snapshot until the confirm or the rollback, the lock the Wi-Fi config plane and agent updates
+take too: while one of them has a window open, `groups.apply` is `busy` with `data.reason`
+`plane_pending` or `update_pending` (nothing is written; the controller retries), and while a LuCI
+apply-with-rollback waits for its confirm, `busy` / `luci_pending`. Unless `groups.confirm {revision}` arrives before `deadline`
 (`confirmSeconds`, 30-600, default 120) the agent restores the previous `wireless` and
 `network` byte for byte and reloads (also at start when the window passed while it was down).
 Before it keeps a revision, `groups.confirm` reads back hostapd's PSK files
@@ -311,8 +323,9 @@ Before it keeps a revision, `groups.confirm` reads back hostapd's PSK files
 binding that lost its MAC on the way to hostapd, which would put every client of the SSID in
 that VLAN) rolls back at once and refuses the confirm with `unsafe_binding`.
 Refusals (`-32000`, `data.error`): `no_managed_iface`, `trunk_unknown`, `uncommitted`
-(changes staged in LuCI), `busy`, `apply_failed`, `not_pending`, `unsafe_binding`; `-32602`
-`bad_params`.
+(changes staged with the uci CLI or in a LuCI session), `busy` (+ `data.reason`), `apply_failed`,
+`not_pending`, `unsafe_binding`, `name_taken`, `untagged_vlan_conflict` (a group on the untagged VLAN
+of a bridge the groups keep converted), `conversion_conflict`; `-32602` `bad_params`.
 
 `groups.state` → `{appliedRevision, pending: {revision, deadline} | null, lastRollback?,
 trunkPort, stations: [{mac, vid, ifname}], issues[]}`: `stations` are the clients on group
