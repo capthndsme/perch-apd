@@ -160,7 +160,7 @@ func run(args []string) int {
 	case "ports":
 		// Straight from /sys/class/net and /etc/board.json: no configuration,
 		// no ubus or nl80211, no controller. Safe to run from /tmp on a live AP.
-		ports := sysFS.Ports(hoststat.PortOptions{})
+		ports := sysFS.Ports(hoststat.PortOptions{Counters: true})
 		if ports == nil {
 			fmt.Fprintln(os.Stderr, "ports: cannot list /sys/class/net")
 			return 1
@@ -234,7 +234,7 @@ var newDevice = func(log *slog.Logger) *device {
 		collect.Wifi{Src: d.wireless},
 		collect.WifiStations{Src: d.wireless},
 	)
-	d.ports = &hoststat.PortReader{FS: fs}
+	d.ports = &hoststat.PortReader{FS: fs, Options: hoststat.PortOptions{Counters: true}}
 	d.deps = &handlers.Deps{
 		Log:      log,
 		Wireless: d.wireless,

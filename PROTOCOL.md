@@ -354,7 +354,8 @@ default collectors.
              {"name":"wan","label":"wan","role":"wan","medium":"copper","mac":"02:00:00:00:00:11",
               "adminUp":true,"carrier":false,"operstate":"down","carrierChanges":2},
              {"name":"lan1","label":"lan1","role":"lan","medium":"copper","mac":"02:00:00:00:00:10",
-              "adminUp":true,"carrier":true,"operstate":"up","speedMbps":1000,"duplex":"full","carrierChanges":3}]}}
+              "adminUp":true,"carrier":true,"operstate":"up","speedMbps":1000,"duplex":"full","carrierChanges":3,
+              "rxBytes":17260817141,"txBytes":275427536004,"counterScope":"port"}]}}
 ```
 
 `text` uses node_exporter-lua's metric names and labels, so the server's
@@ -391,6 +392,8 @@ most 64 entries. A field the kernel does not answer is left out.
 | `operstate` | the kernel's word: `up`, `down`, `lowerlayerdown` (a switch port with no cable), … |
 | `speedMbps`, `duplex` | the negotiated link (`duplex` `full` or `half`); absent without a link |
 | `carrierChanges` | link changes since the interface came up |
+| `rxBytes`, `txBytes` | (1.1.0 and later) bytes the port received from its cable and sent into it, cumulative (they restart with the device or the driver); only while the port has a link |
+| `counterScope` | what those counters cover: `port`, every frame through the socket (a DSA switch port reads the switch's own counters, `ethtool -S`); `cpu`, only what the AP's CPU sent and received (a switch whose byte counters perch-apd does not know; frames switched between two ports are missing) |
 
 An older controller ignores `ports` (it reads only `format`, `text` and `durationMs`).
 
