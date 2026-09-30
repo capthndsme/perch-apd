@@ -166,3 +166,51 @@ func TestRedialDelay(t *testing.T) {
 		t.Fatalf("an ended session's request: %d %q", gen, ch)
 	}
 }
+
+// OnSessionOpen gets a notifier on every open session (the updater re-sends
+// its unacknowledged results there).
+func TestSessionOpenHookNotifies(t *testing.T) {
+	fc := &fakeController{t: t}
+	got := make(chan string, 4)
+	fc.onSession = func(ctx context.Context, c *websocket.Conn) {
+		for {
+			_, b, err := c.Read(ctx)
+			if err != nil {
+				return
+			}
+			var m rpc.Message
+			if json.Unmarshal(b, &m) == nil && m.Method == "agent.update.result" {
+				got <- string(m.Params)
+			}
+		}
+	}
+	srv := httptest.NewServer(fc.handler())
+	defer srv.Close()
+	path := filepath.Join(t.TempDir(), "perch-apd")
+	os.WriteFile(path, []byte("config agent 'main'\n\toption controller '"+srv.URL+"'\n\toption agent_id 'a'\n\toption agent_secret 'b'\n"), 0o600)
+	cfg, _ := config.Load(path)
+	a, err := New(Options{
+		Config: cfg, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Info: &sysinfo.Info{Root: t.TempDir()},
+		OnSessionOpen: func(notify func(string, any) error) {
+			if err := notify("agent.update.result", map[string]string{"updateId": "u-0000000000000001"}); err != nil {
+				t.Errorf("notify: %v", err)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { a.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	select {
+	case p := <-got:
+		if p != `{"updateId":"u-0000000000000001"}` {
+			t.Fatalf("params %s", p)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no notification on the open session")
+	}
+}

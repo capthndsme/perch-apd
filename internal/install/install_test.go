@@ -17,6 +17,7 @@ import (
 	"github.com/capthndsme/perch-apd/internal/agent"
 	"github.com/capthndsme/perch-apd/internal/config"
 	"github.com/capthndsme/perch-apd/internal/sysinfo"
+	"github.com/capthndsme/perch-apd/internal/update"
 )
 
 type harness struct {
@@ -97,6 +98,13 @@ func TestInstallInteractive(t *testing.T) {
 	}
 	if !strings.Contains(h.read(t, KeepFile), "/opt/perch-apd/") {
 		t.Fatal("keep.d entry missing")
+	}
+	// The boot guard (updates, then the Wi-Fi plane), enabled.
+	if h.read(t, update.GuardInit) != string(update.SelfInstalledScript()) {
+		t.Fatal("boot guard differs")
+	}
+	if l, err := os.Readlink(filepath.Join(h.root, update.GuardLink)); err != nil || l != "../init.d/perch-apd-guard" {
+		t.Fatalf("guard link %q %v", l, err)
 	}
 	cfg, err := config.Load(filepath.Join(h.root, ConfigPath))
 	if err != nil {
@@ -227,8 +235,8 @@ func TestUninstall(t *testing.T) {
 	if err := h.env.Uninstall(UninstallOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{OptBin, InitPath, KeepFile} {
-		if _, err := os.Stat(filepath.Join(h.root, p)); !os.IsNotExist(err) {
+	for _, p := range []string{OptBin, InitPath, KeepFile, update.GuardInit, update.GuardLink} {
+		if _, err := os.Lstat(filepath.Join(h.root, p)); !os.IsNotExist(err) {
 			t.Fatalf("%s left behind", p)
 		}
 	}

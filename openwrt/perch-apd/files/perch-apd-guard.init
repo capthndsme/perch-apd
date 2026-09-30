@@ -1,18 +1,25 @@
 #!/bin/sh /etc/rc.common
-# perch-apd-guard: boot guard of the Perch Wi-Fi config plane.
-# When the access point rebooted while a Wi-Fi change from the Perch
-# controller was waiting for its confirm, /etc/config/wireless and network
-# go back to the snapshot in /etc/perch-apd/plane/rollback before the
-# network starts (network is START=20). perch-apd reports the outcome to
-# the controller once it is connected again. Nothing to do otherwise.
+# perch-apd-guard: boot guard of the Perch AP Daemon, before the network
+# starts (network is START=20). Two steps, both only after a reboot inside a
+# window the Perch controller had not confirmed yet; perch-apd reports each
+# outcome to the controller once it is connected again. Nothing to do
+# otherwise.
+# 1. Updates: when the access point restarted while a new perch-apd was
+#    being checked, the previous version goes back (shell only, whatever
+#    state the new binary is in; the script is the previous version's own).
+# 2. The Wi-Fi config plane: when a Wi-Fi change was waiting for its
+#    confirm, /etc/config/wireless and network go back to the snapshot in
+#    /etc/perch-apd/plane/rollback.
 
 START=15
 
+UPDATE=/etc/perch-apd/update
 ROLLBACK=/etc/perch-apd/plane/rollback
 RUNDIR=/var/run/perch-apd
 CONFDIR=/etc/config
 
 start() {
+	[ -x "$UPDATE/perch-update.sh" ] && "$UPDATE/perch-update.sh" boot "$UPDATE" 2>&1 | logger -t perch-apd-guard
 	[ -f "$ROLLBACK/pending.json" ] || return 0
 	local prog out
 	prog=/usr/bin/perch-apd

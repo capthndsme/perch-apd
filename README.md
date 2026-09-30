@@ -188,6 +188,8 @@ joins, and keeps its history.
 | `wifi_config_allow` | `wireless`, `network` | list; nothing else can be allowed |
 | `wifi_config_insecure` | `0` | `1`: signed changes over plain `http://` too (needs a pairing) |
 | `wifi_config_confirm_max` | `900` | the longest a change may wait for its confirm, seconds |
+| `self_update` | `1` | the controller may install a newer Perch AP Daemon release (Settings → Updates): only releases signed with a Perch release key, checked on the AP; the previous version comes back unless the new one reaches the controller again, also across a reboot. `0` refuses every update. [PROTOCOL.md](PROTOCOL.md) §2.6 |
+| `update_key` | | list; more release keys to trust (`RW…`, a signify/usign public key line), e.g. a lab's test key. Only this file adds one |
 | `log_level` | `info` | `debug`, `info`, `warn`, `error` |
 
 How often metrics are pushed is not configured here: the server sends it (the AP's poll
@@ -198,8 +200,10 @@ changes.
 
 With `wifi_config 'write'` a change from the controller that is waiting for its confirm is
 undone even across a reboot: `/etc/init.d/perch-apd-guard` runs before the network starts
-(the package ships it; on a manual install the daemon writes it). `/etc/perch-apd/` holds the
-state of that and of device groups, and is kept over sysupgrade.
+(the package ships it; on a manual install `perch-apd install` and the daemon write it). The
+same guard first puts the previous perch-apd back when the AP restarted while an update was
+being checked. `/etc/perch-apd/` holds the state of those, of updates and of device groups,
+and is kept over sysupgrade.
 
 ## Commands
 
@@ -239,6 +243,7 @@ controller can call:
 | `locate.start` / `locate.stop` | blink every LED, then restore each LED's trigger and settings |
 | `system.reboot` | reboot after answering |
 | `ping` | round trip |
+| `agent.update.*` | self-update (`option self_update`): check a signed release, download it from the controller, hand it to a watchdog that swaps the binary (or runs opkg/apk) and rolls back unless the controller confirms the new version |
 
 The ports are what `perch-apd ports` prints: the switch ports (not the switch's CPU
 port), per-port netdevs and a separate WAN MAC, but no bridges, VLANs or Wi-Fi

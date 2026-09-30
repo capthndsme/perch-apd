@@ -165,6 +165,9 @@ func run(args []string) int {
 				if w := cliWifiPlane(cfg, d); w != nil {
 					d.deps.Wifi = w
 				}
+				if u := cliUpdater(cfg); u != nil {
+					d.deps.Update = u
+				}
 			}
 			out = d.deps.SystemInfo(ctx)
 		} else {
@@ -443,6 +446,15 @@ func runDaemon(ctx context.Context, cfgPath string) int {
 	}
 	defer d.locator.Stop()
 
+	// Self-update first: an update still being checked (this may be the new
+	// version) takes the write lock before groups and the Wi-Fi plane
+	// resume their windows.
+	upd := newUpdater(cfg, d, log)
+	if upd != nil {
+		upd.Startup(ctx)
+		d.deps.Update = upd
+	}
+
 	if cfg.WifiGroups {
 		eng, err := newGroupsEngine(d, log)
 		if err != nil {
@@ -505,6 +517,16 @@ func runDaemon(ctx context.Context, cfgPath string) int {
 	if wp != nil {
 		aopts.OnConfigure, aopts.OnSessionEnd, aopts.RedialFast = wp.Configure, wp.EndSession, wp.RedialFast
 	}
+	if upd != nil {
+		aopts.OnSessionOpen = upd.SessionOpened
+		planeEnd := aopts.OnSessionEnd
+		aopts.OnSessionEnd = func() {
+			if planeEnd != nil {
+				planeEnd()
+			}
+			upd.SessionClosed()
+		}
+	}
 	ag, err := agent.New(aopts)
 	if err != nil {
 		log.Error("cannot start the controller session", "err", err)
@@ -516,6 +538,10 @@ func runDaemon(ctx context.Context, cfgPath string) int {
 	}
 	d.locator.OnEnd = func(reason string) {
 		ag.Notify("locate.ended", map[string]string{"reason": reason})
+	}
+	if upd != nil {
+		// A new version dials once the watchdog has put it in probation.
+		upd.WaitProbation(ctx, time.Minute)
 	}
 	ag.Run(ctx)
 	log.Info("stopping")

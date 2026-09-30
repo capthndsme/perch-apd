@@ -22,6 +22,7 @@ import (
 	"github.com/capthndsme/perch-apd/internal/agent"
 	"github.com/capthndsme/perch-apd/internal/config"
 	"github.com/capthndsme/perch-apd/internal/sysinfo"
+	"github.com/capthndsme/perch-apd/internal/update"
 	"github.com/capthndsme/perch-apd/internal/version"
 )
 
@@ -234,8 +235,31 @@ func (e *Env) installFiles() error {
 	if err := writeFileAtomic(e.path(KeepFile), []byte(keepList), 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", KeepFile, err)
 	}
+	if err := e.installGuard(); err != nil {
+		return fmt.Errorf("writing %s: %w", update.GuardInit, err)
+	}
 	e.printf("Installed %s (kept across sysupgrade via %s)\n", InitPath, KeepFile)
 	return nil
+}
+
+// installGuard puts the boot guard in place (update step, then the Wi-Fi
+// config plane's; START=15) and enables it, as the daemon's updater and the
+// plane would later: the same self-installed script. One already there is
+// left alone.
+func (e *Env) installGuard() error {
+	if !e.exists(update.GuardInit) {
+		if err := writeFileAtomic(e.path(update.GuardInit), update.SelfInstalledScript(), 0o755); err != nil {
+			return err
+		}
+	}
+	link := e.path(update.GuardLink)
+	if _, err := os.Lstat(link); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		return err
+	}
+	return os.Symlink("../init.d/perch-apd-guard", link)
 }
 
 func (e *Env) configureAndJoin(ctx context.Context, o Options, manageService bool) error {
@@ -420,6 +444,11 @@ func (e *Env) Uninstall(o UninstallOptions) error {
 		}
 	}
 	os.Remove(e.path(KeepFile))
+	// The boot guard, when the daemon wrote it (a package's stays).
+	if data, err := os.ReadFile(e.path(update.GuardInit)); err == nil && update.IsSelfInstalled(data) && !e.exists(PkgBin) {
+		os.Remove(e.path(update.GuardLink))
+		os.Remove(e.path(update.GuardInit))
+	}
 	if err := os.RemoveAll(e.path(OptDir)); err != nil {
 		return err
 	}
