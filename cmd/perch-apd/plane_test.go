@@ -36,6 +36,13 @@ func TestConfigGuardCommand(t *testing.T) {
 		"createdAt": time.Now().UTC(), "deadline": time.Now().Add(time.Minute).UTC(), "confirmSeconds": 90,
 		"configs": []string{"wireless"}, "hashesBefore": map[string]string{"wireless": uci.FileHash(before)}, "committed": true})
 	write("/etc/perch-apd/plane/rollback/pending.json", rec)
+	// The marker on tmpfs is still there: no reboot, the daemon keeps it.
+	write("/var/run/perch-apd/apply-a4-000000000001", []byte("a4-000000000001\n"))
+	out.Reset()
+	if code := configGuardCommand(nil, &out, &errb, root); code != 0 || !strings.Contains(out.String(), "did not reboot; the daemon keeps it") {
+		t.Fatalf("owned by the daemon: %d %q", code, out.String())
+	}
+	os.Remove(filepath.Join(root, "/var/run/perch-apd/apply-a4-000000000001"))
 	out.Reset()
 	if code := configGuardCommand(nil, &out, &errb, root); code != 0 ||
 		!strings.Contains(out.String(), "Wi-Fi change a4-000000000001 was pending at the reboot: rolled_back") {

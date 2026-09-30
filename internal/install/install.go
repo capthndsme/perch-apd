@@ -51,7 +51,10 @@ const (
 // list names itself: the new firmware does not ship it, so without that line
 // the first upgrade keeps the daemon and the second one drops it. It also
 // names the configuration, which base-files keeps with all of /etc/config/,
-// so the credentials do not depend on that.
+// so the credentials do not depend on that. /etc/perch-apd/ is the state of
+// the device groups and the Wi-Fi config plane (a change waiting for its
+// confirm is restored after the upgrade, not left in place), and the plane's
+// boot guard, when the daemon installed it.
 const keepList = `# perch-apd installed by 'perch-apd install': keep it across sysupgrade.
 /lib/upgrade/keep.d/perch-apd
 /opt/perch-apd/
@@ -59,6 +62,9 @@ const keepList = `# perch-apd installed by 'perch-apd install': keep it across s
 /etc/rc.d/S95perch-apd
 /etc/rc.d/K10perch-apd
 /etc/config/perch-apd
+/etc/perch-apd/
+/etc/init.d/perch-apd-guard
+/etc/rc.d/S15perch-apd-guard
 `
 
 // Env is the environment an install runs in; tests point Root at a temp dir
@@ -161,6 +167,9 @@ type Options struct {
 	Force      bool // install on a system without /etc/openwrt_release
 	NoStart    bool // do not enable/start the service
 	Rejoin     bool // ask for a token even when already joined
+	// WifiConfig sets option wifi_config (none, read, write): what the
+	// controller may do with the AP's Wi-Fi; "" keeps the file's.
+	WifiConfig string
 }
 
 // Install installs (or refreshes) the manual install and configures it.
@@ -287,6 +296,13 @@ func (e *Env) configureAndJoin(ctx context.Context, o Options, manageService boo
 	if token != "" {
 		values["join_token"] = &token
 	}
+	switch o.WifiConfig {
+	case "":
+	case "none", "read", "write":
+		values["wifi_config"] = &o.WifiConfig
+	default:
+		return fmt.Errorf("--wifi-config %q: use none, read or write", o.WifiConfig)
+	}
 	if changedController || token != "" {
 		empty := ""
 		values["agent_id"], values["agent_secret"] = &empty, &empty
@@ -298,6 +314,9 @@ func (e *Env) configureAndJoin(ctx context.Context, o Options, manageService boo
 		return err
 	}
 	e.printf("Saved the controller address to %s\n", ConfigPath)
+	if o.WifiConfig != "" {
+		e.printf("Wi-Fi management: %s (option wifi_config)\n", o.WifiConfig)
+	}
 
 	if strings.HasPrefix(controller, "https://") && !e.exists(CABundle) && !cfg.TLSInsecure && cfg.CAFile == "" {
 		e.printf("Warning: %s is missing; install ca-bundle (opkg install ca-bundle / apk add ca-bundle) or TLS to the controller will fail.\n", CABundle)

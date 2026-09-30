@@ -352,3 +352,76 @@ func TestJoinThatCannotResolveTheControllerHintsAtRebindProtection(t *testing.T)
 		t.Fatalf("no rebind hint:\n%s", out)
 	}
 }
+
+// The owner opts the AP into Wi-Fi management with the install one-liner
+// (--wifi-config write): a local step, never the controller's. The fresh
+// default file says read.
+func TestWifiConfigFlag(t *testing.T) {
+	h := newHarness(t, "")
+	if err := h.env.Install(context.Background(), Options{Yes: true, Controller: h.srv.URL, Token: "t"}); err != nil {
+		t.Fatalf("%v\n%s", err, h.out)
+	}
+	if cfg, _ := config.Load(filepath.Join(h.root, ConfigPath)); cfg.WifiConfig != "read" {
+		t.Fatalf("default access %q", cfg.WifiConfig)
+	}
+	if err := h.env.Join(context.Background(), Options{Yes: true, Controller: h.srv.URL, Token: "t2", WifiConfig: "write"}); err != nil {
+		t.Fatalf("%v\n%s", err, h.out)
+	}
+	if cfg, _ := config.Load(filepath.Join(h.root, ConfigPath)); cfg.WifiConfig != "write" || cfg.AgentID != "id1" {
+		t.Fatalf("after --wifi-config write: %+v", cfg)
+	}
+	if !strings.Contains(h.out.String(), "Wi-Fi management: write") {
+		t.Fatalf("output %s", h.out)
+	}
+	if err := h.env.Join(context.Background(), Options{Yes: true, Controller: h.srv.URL, WifiConfig: "admin"}); err == nil {
+		t.Fatal("a bad level was taken")
+	}
+	// The plane's state and a self-installed guard survive a sysupgrade.
+	kept := h.read(t, KeepFile)
+	for _, want := range []string{"/etc/perch-apd/", "/etc/init.d/perch-apd-guard", "/etc/rc.d/S15perch-apd-guard"} {
+		if !strings.Contains(kept, "\n"+want+"\n") {
+			t.Errorf("%s does not keep %s", KeepFile, want)
+		}
+	}
+}
+
+// The init script has procd reload the daemon when wireless or network is
+// committed while the plane watches (SIGHUP: read them again at once).
+func TestInitScriptReloadsOnWifiCommits(t *testing.T) {
+	for _, want := range []string{
+		"\tconfig_get access main wifi_config none\n",
+		"\t[ \"$access\" = \"none\" ] || procd_add_reload_trigger wireless network\n",
+		"\tprocd_send_signal \"$NAME\" '*' HUP\n",
+	} {
+		if !bytes.Contains(InitScript, []byte(want)) {
+			t.Errorf("init script lacks %q", want)
+		}
+	}
+}
+
+// Every file of the package is installed by its Makefile, the guard and
+// the keep list included.
+func TestOpenWrtPackageInstallsItsFiles(t *testing.T) {
+	mk, err := os.ReadFile("../../openwrt/perch-apd/Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir("../../openwrt/perch-apd/files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !bytes.Contains(mk, []byte("./files/"+e.Name()+" ")) {
+			t.Errorf("the Makefile does not install files/%s", e.Name())
+		}
+	}
+	for _, want := range []string{"$(1)/etc/init.d/perch-apd-guard", "$(1)/lib/upgrade/keep.d/perch-apd", "/etc/init.d/perch-apd-guard enable"} {
+		if !bytes.Contains(mk, []byte(want)) {
+			t.Errorf("the Makefile lacks %s", want)
+		}
+	}
+	keep, _ := os.ReadFile("../../openwrt/perch-apd/files/perch-apd.keep")
+	if string(keep) != "/etc/perch-apd/\n" {
+		t.Errorf("keep list %q", keep)
+	}
+}

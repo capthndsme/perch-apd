@@ -128,3 +128,14 @@ else: sys.exit(1)
 		t.Fatalf("log %s", log)
 	}
 }
+
+// The package ships the guard the daemon installs.
+func TestGuardScriptMatchesThePackage(t *testing.T) {
+	pkg, err := os.ReadFile("../../openwrt/perch-apd/files/perch-apd-guard.init")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(pkg, GuardScript) {
+		t.Fatal("openwrt/perch-apd/files/perch-apd-guard.init differs from internal/wifiplane/perch-apd-guard.init")
+	}
+}

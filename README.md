@@ -184,6 +184,10 @@ joins, and keeps its history.
 | `tls_insecure` | `0` | accept a self-signed certificate |
 | `ca_file` | | extra CA bundle (PEM) for a private CA |
 | `ports` | `1` | send the Ethernet ports and their link state with every push; `0` leaves them out |
+| `wifi_config` | `read` in a new install's file (`none` when the option is missing) | what the controller may do with the AP's Wi-Fi: `none`; `read` (the configuration with passphrases as fingerprints, and every change); `write` (change `wireless`, and the VLANs it needs in `network`; every change is rolled back unless the AP reaches the controller again and its radios and networks come up). Set it with `perch-apd wifi access`, or `--wifi-config` on `install` / `join`. [PROTOCOL.md](PROTOCOL.md) §2.5 |
+| `wifi_config_allow` | `wireless`, `network` | list; nothing else can be allowed |
+| `wifi_config_insecure` | `0` | `1`: signed changes over plain `http://` too (needs a pairing) |
+| `wifi_config_confirm_max` | `900` | the longest a change may wait for its confirm, seconds |
 | `log_level` | `info` | `debug`, `info`, `warn`, `error` |
 
 How often metrics are pushed is not configured here: the server sends it (the AP's poll
@@ -191,6 +195,11 @@ interval under Settings → Wi-Fi sources) when the daemon connects, and again w
 changes.
 
 `/etc/init.d/perch-apd restart` after editing (a `uci commit` + `reload_config` does it too).
+
+With `wifi_config 'write'` a change from the controller that is waiting for its confirm is
+undone even across a reboot: `/etc/init.d/perch-apd-guard` runs before the network starts
+(the package ships it; on a manual install the daemon writes it). `/etc/perch-apd/` holds the
+state of that and of device groups, and is kept over sysupgrade.
 
 ## Commands
 

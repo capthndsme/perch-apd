@@ -1,0 +1,58 @@
+#!/bin/sh /etc/rc.common
+# perch-apd-guard: boot guard of the Perch Wi-Fi config plane.
+# When the access point rebooted while a Wi-Fi change from the Perch
+# controller was waiting for its confirm, /etc/config/wireless and network
+# go back to the snapshot in /etc/perch-apd/plane/rollback before the
+# network starts (network is START=20). perch-apd reports the outcome to
+# the controller once it is connected again. Nothing to do otherwise.
+
+START=15
+
+ROLLBACK=/etc/perch-apd/plane/rollback
+RUNDIR=/var/run/perch-apd
+CONFDIR=/etc/config
+
+start() {
+	[ -f "$ROLLBACK/pending.json" ] || return 0
+	local prog out
+	prog=/usr/bin/perch-apd
+	[ -x "$prog" ] || prog=/opt/perch-apd/perch-apd
+	if [ -x "$prog" ]; then
+		if out="$("$prog" config-guard 2>&1)"; then
+			[ -n "$out" ] && logger -t perch-apd-guard "$out"
+			return 0
+		fi
+		logger -t perch-apd-guard "config-guard failed (${out:-no output}); restoring from the snapshot directly"
+	fi
+	guard_fallback
+	return 0
+}
+
+# Without a daemon that knows the plane (its binary gone, or an older one
+# swapped in), the snapshot's files go back as they are.
+guard_fallback() {
+	local id dir c
+	id="$(jsonfilter -i "$ROLLBACK/pending.json" -e '@.applyId' 2>/dev/null)"
+	case "$id" in
+		''|*/*|.*)
+			logger -t perch-apd-guard "$ROLLBACK/pending.json names no apply; nothing restored"
+			return 0
+			;;
+	esac
+	# The daemon owns a window whose marker exists (no reboot happened).
+	[ -e "$RUNDIR/apply-$id" ] && return 0
+	dir="$ROLLBACK/$id/before"
+	for c in $(jsonfilter -i "$ROLLBACK/pending.json" -e '@.configs[*]' 2>/dev/null); do
+		case "$c" in
+			wireless|network|perch-managed) ;;
+			*) continue ;;
+		esac
+		[ -f "$dir/$c" ] || continue
+		if cp "$dir/$c" "$CONFDIR/.$c.perch-guard" && mv "$CONFDIR/.$c.perch-guard" "$CONFDIR/$c"; then
+			logger -t perch-apd-guard "apply $id was pending at the reboot: restored $CONFDIR/$c"
+		else
+			logger -t perch-apd-guard "apply $id: restoring $CONFDIR/$c failed"
+		fi
+	done
+	mv "$ROLLBACK/pending.json" "$ROLLBACK/pending.json.restored-$id"
+}

@@ -175,4 +175,11 @@ func TestWifiConfigOptions(t *testing.T) {
 	if c.WifiConfig != "none" || strings.Join(c.WifiConfigAllow, ",") != "network,wireless" || c.WifiConfigConfirmMax != MinWifiConfigConfirmMax || c.TransportVerified() {
 		t.Fatalf("odd values: %+v", c)
 	}
+	// The package's default file: read (Wi-Fi design, decision D2).
+	path := filepath.Join(t.TempDir(), "perch-apd")
+	os.WriteFile(path, DefaultFile, 0o600)
+	if c, _ := Load(path); c.WifiConfig != "read" || strings.Join(c.WifiConfigAllow, ",") != "wireless,network" ||
+		c.WifiConfigInsecure || c.WifiConfigConfirmMax != 900 {
+		t.Fatalf("the package's default file: %+v", c)
+	}
 }

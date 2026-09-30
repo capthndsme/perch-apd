@@ -81,12 +81,18 @@ func configGuardCommand(args []string, out, errw io.Writer, root string) int {
 		fmt.Fprintf(errw, "unexpected argument %q\n\n%s", a, configGuardUsage)
 		return 2
 	}
+	pending, _ := plane.PendingApply(wifiplane.GuardOptions(root))
 	res, err := wifiplane.RunGuard(root, time.Now())
 	if err != nil {
 		fmt.Fprintf(errw, "perch-apd config-guard: %v\n", err)
 		return 1
 	}
 	if res == nil {
+		if pending != nil {
+			// Its marker is still there: no reboot, the daemon keeps the window.
+			fmt.Fprintf(out, "perch-apd config-guard: Wi-Fi change %s waits for its confirm and the device did not reboot; the daemon keeps it\n", pending.ApplyID)
+			return 0
+		}
 		fmt.Fprintln(out, "perch-apd config-guard: no pending Wi-Fi change")
 		return 0
 	}

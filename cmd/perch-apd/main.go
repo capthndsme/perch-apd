@@ -44,8 +44,9 @@ const usage = `perch-apd %s: Perch AP Daemon
 
 Usage:
   perch-apd install     [--controller URL] [--token TOKEN] [--yes] [--no-start] [--force]
+                        [--wifi-config none|read|write]
                         copy to /opt/perch-apd, set up the service, join the controller
-  perch-apd join        [--controller URL] [--token TOKEN] [--yes]
+  perch-apd join        [--controller URL] [--token TOKEN] [--yes] [--wifi-config none|read|write]
                         (re)join a controller, e.g. after "Forget agent" in the dashboard
   perch-apd uninstall   [--purge]
                         remove the /opt install and its service (--purge: also the config)
@@ -105,10 +106,18 @@ func run(args []string) int {
 	force := fs.Bool("force", false, "install even without /etc/openwrt_release")
 	purge := fs.Bool("purge", false, "also remove the configuration (uninstall)")
 	collectors := fs.String("collect", "", "comma-separated collectors (metrics)")
+	wifiConfig := fs.String("wifi-config", "", "none, read or write: what the controller may do with the Wi-Fi (install, join)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
+		return 2
+	}
+
+	switch *wifiConfig {
+	case "", "none", "read", "write":
+	default:
+		fmt.Fprintf(os.Stderr, "--wifi-config %q: use none, read or write\n", *wifiConfig)
 		return 2
 	}
 
@@ -120,13 +129,13 @@ func run(args []string) int {
 		return runDaemon(ctx, *cfgPath)
 	case "install":
 		env := install.DefaultEnv()
-		if err := env.Install(ctx, install.Options{Controller: *controller, Token: *token, Yes: *yes, Force: *force, NoStart: *noStart}); err != nil {
+		if err := env.Install(ctx, install.Options{Controller: *controller, Token: *token, Yes: *yes, Force: *force, NoStart: *noStart, WifiConfig: *wifiConfig}); err != nil {
 			fmt.Fprintln(os.Stderr, "install:", err)
 			return 1
 		}
 	case "join":
 		env := install.DefaultEnv()
-		if err := env.Join(ctx, install.Options{Controller: *controller, Token: *token, Yes: *yes}); err != nil {
+		if err := env.Join(ctx, install.Options{Controller: *controller, Token: *token, Yes: *yes, WifiConfig: *wifiConfig}); err != nil {
 			fmt.Fprintln(os.Stderr, "join:", err)
 			return 1
 		}
