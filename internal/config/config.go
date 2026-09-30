@@ -62,6 +62,14 @@ type Config struct {
 	// WifiConfigConfirmMax caps every confirm window, seconds (option
 	// wifi_config_confirm_max, 30-1800, default 900).
 	WifiConfigConfirmMax int
+
+	// SelfUpdate lets the controller install signed Perch releases of this
+	// daemon (option self_update, default on; agent updates, device.md 10.1).
+	SelfUpdate bool
+	// UpdateKeys are release keys this AP trusts besides the built-in ones
+	// (list update_key, 'RW…' public key lines). The daemon never writes
+	// this file for an update, so only root on the AP can add one.
+	UpdateKeys []string
 }
 
 // Wi-Fi config plane defaults and bounds.
@@ -114,6 +122,13 @@ func Load(path string) (*Config, error) {
 		WifiConfig:           parseAccess(get("wifi_config", "none")),
 		WifiConfigInsecure:   parseBool(get("wifi_config_insecure", "0"), false),
 		WifiConfigConfirmMax: parseSeconds(get("wifi_config_confirm_max", ""), DefaultWifiConfigConfirmMax, MinWifiConfigConfirmMax, MaxWifiConfigConfirmMax),
+
+		SelfUpdate: parseBool(get("self_update", "1"), true),
+	}
+	for _, k := range f.GetList(SectionName, "update_key") {
+		if k = strings.TrimSpace(k); k != "" {
+			c.UpdateKeys = append(c.UpdateKeys, k)
+		}
 	}
 	allow := f.GetList(SectionName, "wifi_config_allow")
 	if len(allow) == 0 {

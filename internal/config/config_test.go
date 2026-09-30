@@ -183,3 +183,49 @@ func TestWifiConfigOptions(t *testing.T) {
 		t.Fatalf("the package's default file: %+v", c)
 	}
 }
+
+// Self-update is on unless the file turns it off (a config from before the
+// option keeps it on); update_key entries are extra trusted keys.
+func TestSelfUpdateOptions(t *testing.T) {
+	for value, want := range map[string]bool{"": true, "'1'": true, "'0'": false, "'off'": false, "'bogus'": true} {
+		text := "config agent 'main'\n\toption enabled '1'\n"
+		if value != "" {
+			text += "\toption self_update " + value + "\n"
+		}
+		path := filepath.Join(t.TempDir(), "perch-apd")
+		os.WriteFile(path, []byte(text), 0o600)
+		c, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.SelfUpdate != want || len(c.UpdateKeys) != 0 {
+			t.Errorf("option self_update %s: SelfUpdate=%v keys %v, want %v", value, c.SelfUpdate, c.UpdateKeys, want)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "perch-apd")
+	os.WriteFile(path, []byte("config agent 'main'\n\tlist update_key 'RWkey1'\n\tlist update_key ' '\n\tlist update_key 'RWkey2'\n"), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.SelfUpdate || strings.Join(c.UpdateKeys, ",") != "RWkey1,RWkey2" {
+		t.Fatalf("keys %v self_update %v", c.UpdateKeys, c.SelfUpdate)
+	}
+	// The shipped file says it (on) and names no key.
+	c, err = Load(writeDefault(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.SelfUpdate || len(c.UpdateKeys) != 0 || !strings.Contains(string(DefaultFile), "\toption self_update '1'\n") {
+		t.Fatalf("default file: self_update %v keys %v", c.SelfUpdate, c.UpdateKeys)
+	}
+}
+
+func writeDefault(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "perch-apd")
+	if err := os.WriteFile(path, DefaultFile, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}

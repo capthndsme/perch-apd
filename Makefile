@@ -1,7 +1,20 @@
+# Reproducible builds. A release binary is the same byte for byte on any
+# machine given the same commit (a clean checkout: the Go toolchain records
+# vcs.revision, vcs.time and vcs.modified), the same Go toolchain down to the
+# patch release (recorded too: `go version -m <binary>`), the same module
+# graph (GOWORK=off for published releases, go.sum pins the rest) and the same
+# VERSION. The build fixes everything else: CGO_ENABLED=0 (pure Go),
+# -trimpath (no local paths), fixed -ldflags (no time, host or user in them),
+# fixed tags, and the target variables below (an environment's GOAMD64=v3 or
+# GOARM64 must not leak into a release). scripts/sign-release.sh rebuilds a
+# release this way and refuses to sign unless every binary matches.
 MODULE  := github.com/capthndsme/perch-apd
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo dev)
 LDFLAGS := -s -w -X $(MODULE)/internal/version.Version=$(VERSION)
 GOFLAGS := -trimpath
+export GOAMD64   := v1
+export GOARM64   := v8.0
+export GOEXPERIMENT :=
 # nethttpomithttp2 leaves net/http's bundled HTTP/2 out: the daemon speaks
 # HTTP/1.1 only (the kit's link.NewHTTPClient; a WebSocket cannot be
 # upgraded over HTTP/2), and the unused HTTP/2 client costs a mipsle binary
@@ -11,7 +24,7 @@ DIST    := dist
 
 export CGO_ENABLED := 0
 
-.PHONY: build test vet release clean size
+.PHONY: build test vet release files clean size
 
 build:  ## native binary in out/
 	go build $(GOFLAGS) -tags $(TAGS) -ldflags "$(LDFLAGS)" -o out/perch-apd ./cmd/perch-apd
@@ -75,6 +88,16 @@ size:
 	[ $$delta -le $(PLANE_BUDGET) ] || { echo "the Wi-Fi config plane is over its size budget"; fail=1; }; \
 	[ $$gz -le $(GZIP_BUDGET) ] || { echo "perch-apd is over its gzip budget: it would not fit beside the old binary on an 8 MB-flash AP"; fail=1; }; \
 	exit $$fail
+
+# The files bundle a self-update installs next to the binary on devices no
+# package manages (agent-updates protocol.md 1.1, kind "files"): the members of
+# openwrt/perch-apd/files.json, built by the kit's perch-release. After
+# `make release` (which empties dist/); CI attaches it to the release, and
+# scripts/sign-release.sh builds it again to compare its members.
+PERCH_RELEASE ?= go run github.com/capthndsme/perch-agentkit/cmd/perch-release
+files:
+	@mkdir -p $(DIST)
+	$(PERCH_RELEASE) bundle -spec openwrt/perch-apd/files.json -root . -o $(DIST)/perch-apd-files.tar.gz
 
 clean:
 	rm -rf $(DIST) out

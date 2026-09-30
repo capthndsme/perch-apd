@@ -218,7 +218,9 @@ exposes `hostapd.<ifname>` on ubus; `locate` when `/sys/class/leds` has LEDs;
 `reboot` on OpenWrt; `ports` (1.0.0 and later) when the pushes carry the Ethernet ports
 (`option ports '1'`, the default) and the device has at least one; `wifi_config` (1.2.0 and
 later) in every build with the Wi-Fi config plane, whatever the AP allows: the result then
-also carries `wifiConfig`, the plane's hello (§2.5). `band` in
+also carries `wifiConfig`, the plane's hello (§2.5); `agent_update` (1.2.0 and later) when
+the AP can update itself now (§2.6). Every build with the updater adds the `update` block,
+also when something refuses an update (its `refusal` says why). `band` in
 `interfaces` is `2.4`, `5`, `6` or `60` (the server's convention); `band` in `radios`
 is UCI's (`2g`, `5g`, `6g`, `60g`).
 
@@ -421,6 +423,8 @@ An older controller ignores `ports` (it reads only `format`, `text` and `duratio
 | `wifi.config.changed` | `{hashes, changed, origin, applyId?, author, at, uncommitted}` | §2.5 |
 | `wifi.config.result` | `{applyId, kind, outcome, reason, at, hashes, discarded?, health?, detail?}` | §2.5 |
 | `wifi.health.changed` | `{at, ok, problems}` | §2.5 |
+| `agent.update.progress` | `{updateId, phase, file, bytes, totalBytes}` | §2.6 |
+| `agent.update.result` | `{updateId, outcome, reason, detail, fromVersion, toVersion, at}` | §2.6 |
 
 The server ignores notifications it does not know; agents ignore requests they
 do not know with -32601.
@@ -543,13 +547,59 @@ checks and channel scans left out); each session gets the state once when steady
 `perch-apd wifi read [--fp-key-file FILE] [config…]` (fingerprints with an empty key unless
 FILE holds the 64-hex fleet key), `perch-apd wifi health`.
 
+### 2.6 Self-update (`agent.update.*`, 1.2.0 and later)
+
+The controller installs signed Perch AP Daemon releases on the AP (dashboard: Settings →
+Updates). The formats (release manifest, signature, version order, download URLs, the `update`
+block, error codes, files on the device) are the controller's `docs/agent-updates.md`; this
+is the AP's part.
+
+- `system.info` carries `update`: `protocol`, `enabled` (`option self_update`), `refusal`
+  (`self_update_off`, `no_trusted_keys`, `install_kind_unsupported`, `not_openwrt` or null),
+  `keyIds`, `floor`, `installKind` (`package`, `swapped` = a package record of another
+  version, `unowned` = `/usr/bin/perch-apd` without a record, `manual` = `/opt/perch-apd`),
+  `methods`, the binary's path and SHA-256, the package manager and record, `openwrt`, `arch`,
+  `flash` and `ram`, `guard`, `previous` (a kept older version), `active` (the update in
+  progress) and `results` (outcomes the controller has not acknowledged).
+- Methods: `agent.update.status` (the block), `.stage` (verify a release, check flash and
+  RAM, download in the background; `dryRun` checks only), `.install` (hand the staged update
+  to the watchdog: the session then closes), `.confirm` (sent to the **new** process once it
+  is healthy), `.abort`, `.ack` (results). Notifications: `agent.update.progress`,
+  `agent.update.result`; unacknowledged results are sent again on every new session.
+- Trust: the AP installs only a release whose manifest is signed (Ed25519, signify/usign
+  format) by a key it trusts: the Perch release keys built into the daemon, plus
+  `list update_key` entries in `/etc/config/perch-apd` (the updater never writes that file).
+  Every file is checked against the manifest's SHA-256; a release below the AP's floor, for
+  another product, arch or package manager, or with files outside
+  `/etc/init.d/perch-apd`, `/etc/init.d/perch-apd-guard` and `/lib/upgrade/keep.d/perch-apd`
+  is refused.
+- Install: `perch-update.sh` (written by the version that planned the update) keeps the old
+  files (a hardlink on flash, or a copy in RAM where the flash cannot hold both binaries),
+  stops the service, swaps the binary or runs `opkg install --force-downgrade` /
+  `apk add --allow-untrusted`, starts it and waits. Without a confirm within the check
+  window (180 s by default), on a crash loop or an abort it restores the old files and
+  restarts; after a reboot inside the window `/etc/init.d/perch-apd-guard` restores before
+  the network starts. A rollback never runs the package manager.
+- One writer at a time: an install takes the AP's write lock (shared with device groups and
+  the Wi-Fi config plane) and keeps it until the new version is confirmed or rolled back.
+  Meanwhile `groups.apply` and `wifi.config.apply` are refused `busy` (reason
+  `update_pending`); an update is refused `busy_pending_apply` (reason `groups_pending` or
+  `plane_pending`) while one of those waits for its confirm.
+- The new version reports `active.phase` `probation` in the `system.info` of its first
+  session (it dials once the watchdog has set it); the controller confirms after the session
+  has been up 30 s with 2 accepted pushes (its settings).
+
 ## 3. Security notes
 
 - The agent listens on no port: it dials out to the controller and nothing
   can connect to it.
 - The agent executes a fixed set of methods. There is no remote shell: a
-  compromised controller can kick clients, blink LEDs and reboot APs, nothing
-  more. With `option wifi_groups '1'` it can also add Wi-Fi passphrases and
+  compromised controller can kick clients, blink LEDs, reboot APs, and install
+  any genuine Perch AP Daemon release at or above the AP's version floor (with
+  `option self_update '1'`, the default; §2.6), nothing more. It cannot make
+  the AP run code the Perch release key did not sign: the AP checks the
+  signature and every file itself, so updates are allowed over plain `http://`
+  too. With `option wifi_groups '1'` it can also add Wi-Fi passphrases and
   VLANs to the listed SSIDs (Perch's own sections only, rolled back unless
   confirmed): leave it off on APs that carry no device groups.
 - With `option wifi_config 'read'` (the package's default) a controller reads

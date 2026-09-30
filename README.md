@@ -188,6 +188,8 @@ joins, and keeps its history.
 | `wifi_config_allow` | `wireless`, `network` | list; nothing else can be allowed |
 | `wifi_config_insecure` | `0` | `1`: signed changes over plain `http://` too (needs a pairing) |
 | `wifi_config_confirm_max` | `900` | the longest a change may wait for its confirm, seconds |
+| `self_update` | `1` | the controller may install a newer Perch AP Daemon release (Settings → Updates): only releases signed with a Perch release key, checked on the AP; the previous version comes back unless the new one reaches the controller again, also across a reboot. `0` refuses every update. [PROTOCOL.md](PROTOCOL.md) §2.6 |
+| `update_key` | | list; more release keys to trust (`RW…`, a signify/usign public key line), e.g. a lab's test key. Only this file adds one |
 | `log_level` | `info` | `debug`, `info`, `warn`, `error` |
 
 How often metrics are pushed is not configured here: the server sends it (the AP's poll
@@ -198,8 +200,10 @@ changes.
 
 With `wifi_config 'write'` a change from the controller that is waiting for its confirm is
 undone even across a reboot: `/etc/init.d/perch-apd-guard` runs before the network starts
-(the package ships it; on a manual install the daemon writes it). `/etc/perch-apd/` holds the
-state of that and of device groups, and is kept over sysupgrade.
+(the package ships it; on a manual install `perch-apd install` and the daemon write it). The
+same guard first puts the previous perch-apd back when the AP restarted while an update was
+being checked. `/etc/perch-apd/` holds the state of those, of updates and of device groups,
+and is kept over sysupgrade.
 
 ## Commands
 
@@ -239,6 +243,7 @@ controller can call:
 | `locate.start` / `locate.stop` | blink every LED, then restore each LED's trigger and settings |
 | `system.reboot` | reboot after answering |
 | `ping` | round trip |
+| `agent.update.*` | self-update (`option self_update`): check a signed release, download it from the controller, hand it to a watchdog that swaps the binary (or runs opkg/apk) and rolls back unless the controller confirms the new version |
 
 The ports are what `perch-apd ports` prints: the switch ports (not the switch's CPU
 port), per-port netdevs and a separate WAN MAC, but no bridges, VLANs or Wi-Fi
@@ -312,6 +317,26 @@ make size        # mipsle size budgets: the Wi-Fi config plane, the whole binary
 Pure Go, no cgo: `CGO_ENABLED=0` cross-compiles to every target (MIPS with
 `GOMIPS=softfloat`). Pushing a `v*` tag runs `.github/workflows/release.yml`, which
 publishes the assets the install commands download.
+
+### Releases and signing
+
+The builds are reproducible (the Makefile says how): the same commit and Go release
+give the same bytes on any machine. A self-update installs only a release whose
+`perch-manifest.json` the owner signed; CI attaches the manifest unsigned
+(`openwrt.yml`, once the packages are built) and never holds a key.
+
+```sh
+scripts/sign-release.sh 1.2.0          # download, rebuild, compare, sign, --upload the .sig
+scripts/local-release.sh 1.2.0-pre.5 --controller https://perch.example.com
+                                       # an unpublished build: build, sign-release, upload
+make files                             # the files bundle (openwrt/perch-apd/files.json)
+```
+
+`sign-release.sh` refuses to sign unless its own rebuild of the manifest's commit
+matches what was published: every binary byte for byte, every OpenWrt package by the
+files, modes, hashes, maintainer scripts and dependencies it installs (rebuilt in the
+SDK image; archive metadata may differ), the bundle by its members. signify-openbsd asks
+for the key's passphrase itself. `release.env` holds the next release's floor fields.
 
 The WebSocket session (dial, pings, JSON-RPC, calls, the push scheduler, reconnect
 backoff) and the `/proc` parsers for load, memory, interface counters and conntrack come

@@ -78,6 +78,15 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # The manifest's inputs (release.env, sdk.env, files.json, the kit
+      # version in go.mod) come from the tag.
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
       - uses: actions/download-artifact@v4
         with:
           path: packages
@@ -97,3 +106,28 @@ jobs:
             echo "waiting for release $TAG"; sleep 20
           done
           gh release upload "$TAG" perch-apd_* openwrt-packages.sha256 --clobber
+      # The UNSIGNED manifest of every artefact (agent-updates protocol.md 1.1).
+      # CI never signs: the owner runs scripts/sign-release.sh, which rebuilds
+      # everything, compares, signs with his key and attaches the .sig. Until
+      # then controllers list the release as unsigned and offer nothing.
+      - name: Unsigned manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p release
+          for i in $(seq 1 45); do
+            gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx perch-apd-files.tar.gz && break
+            echo "waiting for the binaries of $TAG"; sleep 20
+          done
+          gh release download "$TAG" -D release -p 'perch-apd-linux-*' -p 'perch-apd-files.tar.gz'
+          cp packages/perch-apd_* release/
+          . ./release.env
+          go run github.com/capthndsme/perch-agentkit/cmd/perch-release manifest \
+            -product perch-apd -version "${TAG#v}" -commit "$(git rev-parse HEAD)" \
+            -notes-url "https://github.com/$GH_REPO/releases/tag/$TAG" \
+            -min-version "$MIN_VERSION" -min-from-version "$MIN_FROM_VERSION" \
+            -min-controller-version "$MIN_CONTROLLER_VERSION" \
+            -sdk-env openwrt/sdk.env -files-spec openwrt/perch-apd/files.json \
+            -o perch-manifest.json release
+          gh release upload "$TAG" perch-manifest.json --clobber

@@ -17,6 +17,7 @@ import (
 	"github.com/capthndsme/perch-agentkit/hoststat"
 	"github.com/capthndsme/perch-agentkit/openwrt/ubus"
 	"github.com/capthndsme/perch-agentkit/rpc"
+	"github.com/capthndsme/perch-agentkit/update"
 	"github.com/capthndsme/perch-apd/internal/groups"
 	"github.com/capthndsme/perch-apd/internal/leds"
 	"github.com/capthndsme/perch-apd/internal/sysinfo"
@@ -60,6 +61,9 @@ type Deps struct {
 	// Wifi is the Wi-Fi config plane (wifi.*, capability wifi_config); nil
 	// in a build without it.
 	Wifi WifiPlane
+	// Update is agent self-update (agent.update.*, capability
+	// agent_update, system.info's update block); nil = none.
+	Update Updater
 }
 
 func (d *Deps) now() time.Time {
@@ -82,6 +86,7 @@ func Register(disp *rpc.Dispatcher, d *Deps) {
 	disp.Register("groups.confirm", d.groupsConfirm)
 	disp.Register("groups.state", d.groupsState)
 	registerWifi(disp, d.Wifi)
+	registerUpdate(disp, d.Update)
 }
 
 // groupsError maps a groups refusal onto the protocol's errors.
@@ -170,6 +175,10 @@ type SystemInfo struct {
 	// WifiConfig is the Wi-Fi config plane's hello (access, hashes, the
 	// apply in progress, results to acknowledge); absent without a plane.
 	WifiConfig any `json:"wifiConfig,omitempty"`
+	// Update is the self-update block (agent-updates protocol.md 3):
+	// install kind, keys, flash and RAM, the update in progress and the
+	// results to acknowledge; absent without an updater.
+	Update *update.Status `json:"update,omitempty"`
 }
 
 // SystemInfo gathers the system.info result (also used by `perch-apd info`).
@@ -212,6 +221,7 @@ func (d *Deps) SystemInfo(ctx context.Context) SystemInfo {
 	if d.Wifi != nil {
 		info.WifiConfig = d.Wifi.Hello(ctx)
 	}
+	info.Update = updateBlock(ctx, d.Update)
 	return info
 }
 
@@ -247,6 +257,11 @@ func (d *Deps) Capabilities(ctx context.Context) []string {
 	if d.Wifi != nil {
 		// Whatever the access: system.info's wifiConfig.access tells.
 		caps = append(caps, "wifi_config")
+	}
+	if d.Update != nil {
+		if c := d.Update.Capability(); c != "" {
+			caps = append(caps, c) // agent_update: nothing refuses an update now
+		}
 	}
 	return caps
 }

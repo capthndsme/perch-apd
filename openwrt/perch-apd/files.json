@@ -1,0 +1,8 @@
+{
+  "product": "perch-apd",
+  "file": "perch-apd-files.tar.gz",
+  "members": [
+    {"name": "perch-apd.init", "source": "openwrt/perch-apd/files/perch-apd.init", "path": "/etc/init.d/perch-apd", "mode": "0755", "installKinds": ["swapped", "unowned", "manual"], "when": "always"},
+    {"name": "perch-apd.keep", "source": "openwrt/perch-apd/files/perch-apd.keep", "path": "/lib/upgrade/keep.d/perch-apd", "mode": "0644", "installKinds": ["swapped", "unowned"], "when": "always"}
+  ]
+}

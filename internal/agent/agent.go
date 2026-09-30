@@ -220,6 +220,10 @@ type Options struct {
 	// OnSessionEnd runs after every session ended (the plane stops watching
 	// until the next configure).
 	OnSessionEnd func()
+	// OnSessionOpen runs when a session is open, with the way to notify
+	// the controller on it (the updater re-sends its unacknowledged results
+	// and sends its progress there).
+	OnSessionOpen func(notify func(method string, params any) error)
 	// RedialFast, when it answers true after a session ended, dials again
 	// after FastRedial instead of the backoff (an apply waits for its
 	// confirm on a fresh session, or a rollback just happened).
@@ -241,6 +245,7 @@ type Agent struct {
 
 	onConf     func(json.RawMessage)
 	onEnd      func()
+	onOpen     func(notify func(method string, params any) error)
 	redialFast func() bool
 
 	mu   sync.Mutex
@@ -279,7 +284,7 @@ func New(o Options) (*Agent, error) {
 	}
 	return &Agent{cfg: o.Config, log: log, disp: disp, info: o.Info, http: client, sleep: sleep,
 		onJ: o.OnJoined, mets: o.Metrics, ports: o.Ports, wait: wait,
-		onConf: o.OnConfigure, onEnd: o.OnSessionEnd, redialFast: o.RedialFast}, nil
+		onConf: o.OnConfigure, onEnd: o.OnSessionEnd, onOpen: o.OnSessionOpen, redialFast: o.RedialFast}, nil
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
@@ -518,6 +523,9 @@ func (a *Agent) session(ctx context.Context) error {
 			a.setSession(s)
 			defer a.clearSession(s)
 			a.log.Info("connected to the controller", "url", wsURL)
+			if a.onOpen != nil {
+				a.onOpen(s.Notify)
+			}
 			if a.mets == nil {
 				<-sctx.Done()
 				return
