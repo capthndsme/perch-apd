@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/capthndsme/perch-apd/internal/uci"
@@ -45,6 +46,40 @@ type Config struct {
 	WifiGroups bool
 	// WifiGroupsInsecure allows that over a plain ws:// controller too.
 	WifiGroupsInsecure bool
+
+	// WifiConfig is the Wi-Fi config plane's access (option wifi_config):
+	// none, read or write. A file without the option is none (the package's
+	// default file says read); anything else is none too.
+	WifiConfig string
+	// WifiConfigAllow are the configs the plane may read and write (list
+	// wifi_config_allow; only wireless and network are ever honoured).
+	WifiConfigAllow []string
+	// WifiConfigIgnored are the names of wifi_config_allow that are not.
+	WifiConfigIgnored []string
+	// WifiConfigInsecure: writes over plain ws:// or an unverified
+	// certificate, when signed (option wifi_config_insecure).
+	WifiConfigInsecure bool
+	// WifiConfigConfirmMax caps every confirm window, seconds (option
+	// wifi_config_confirm_max, 30-1800, default 900).
+	WifiConfigConfirmMax int
+}
+
+// Wi-Fi config plane defaults and bounds.
+const (
+	DefaultWifiConfigConfirmMax = 900
+	MinWifiConfigConfirmMax     = 30
+	MaxWifiConfigConfirmMax     = 1800
+)
+
+// WifiConfigurable are the only configs the Wi-Fi config plane may ever
+// touch, whatever wifi_config_allow lists.
+var WifiConfigurable = []string{"wireless", "network"}
+
+// TransportVerified reports whether the controller is reached over https
+// with the certificate verified (tls_insecure off; a ca_file verifies too):
+// what Wi-Fi config writes need unless they are signed.
+func (c *Config) TransportVerified() bool {
+	return strings.HasPrefix(c.Controller, "https://") && !c.TLSInsecure
 }
 
 // HasCredentials reports whether the agent has joined a controller.
@@ -75,6 +110,30 @@ func Load(path string) (*Config, error) {
 
 		WifiGroups:         parseBool(get("wifi_groups", "0"), false),
 		WifiGroupsInsecure: parseBool(get("wifi_groups_insecure", "0"), false),
+
+		WifiConfig:           parseAccess(get("wifi_config", "none")),
+		WifiConfigInsecure:   parseBool(get("wifi_config_insecure", "0"), false),
+		WifiConfigConfirmMax: parseSeconds(get("wifi_config_confirm_max", ""), DefaultWifiConfigConfirmMax, MinWifiConfigConfirmMax, MaxWifiConfigConfirmMax),
+	}
+	allow := f.GetList(SectionName, "wifi_config_allow")
+	if len(allow) == 0 {
+		// `option wifi_config_allow 'wireless network'` works too.
+		allow = strings.Fields(get("wifi_config_allow", ""))
+	}
+	if len(allow) == 0 {
+		allow = WifiConfigurable
+	}
+	for _, name := range allow {
+		name = strings.TrimSpace(name)
+		switch {
+		case name == "":
+		case contains(WifiConfigurable, name):
+			if !contains(c.WifiConfigAllow, name) {
+				c.WifiConfigAllow = append(c.WifiConfigAllow, name)
+			}
+		default:
+			c.WifiConfigIgnored = append(c.WifiConfigIgnored, name)
+		}
 	}
 	if raw := get("controller", ""); raw != "" {
 		u, err := NormalizeControllerURL(raw)
@@ -173,6 +232,40 @@ func NormalizeControllerURL(raw string) (string, error) {
 	u.Path = strings.TrimRight(u.Path, "/")
 	u.RawPath = ""
 	return u.String(), nil
+}
+
+// parseAccess reads a Wi-Fi config access level; unknown is none.
+func parseAccess(v string) string {
+	switch v = strings.ToLower(strings.TrimSpace(v)); v {
+	case "read", "write":
+		return v
+	}
+	return "none"
+}
+
+// parseSeconds reads a whole number of seconds, clamped; def when empty
+// or not a number.
+func parseSeconds(v string, def, lo, hi int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return def
+	}
+	if n < lo {
+		return lo
+	}
+	if n > hi {
+		return hi
+	}
+	return n
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 func parseBool(v string, def bool) bool {

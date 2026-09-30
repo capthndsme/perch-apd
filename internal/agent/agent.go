@@ -214,6 +214,16 @@ type Options struct {
 	// ConfigWait is how long to wait for agent.configure before pushing with
 	// the defaults (tests shorten it).
 	ConfigWait time.Duration
+	// OnConfigure gets the params of every agent.configure (the Wi-Fi config
+	// plane reads its wifiConfig block from them).
+	OnConfigure func(params json.RawMessage)
+	// OnSessionEnd runs after every session ended (the plane stops watching
+	// until the next configure).
+	OnSessionEnd func()
+	// RedialFast, when it answers true after a session ended, dials again
+	// after FastRedial instead of the backoff (an apply waits for its
+	// confirm on a fresh session, or a rollback just happened).
+	RedialFast func() bool
 }
 
 // Agent is the controller client.
@@ -229,8 +239,17 @@ type Agent struct {
 	ports PortSource
 	wait  time.Duration
 
+	onConf     func(json.RawMessage)
+	onEnd      func()
+	redialFast func() bool
+
 	mu   sync.Mutex
 	sess *link.Session
+	// gen numbers the sessions of this process; cur is the one being run
+	// (redial.go).
+	gen       uint64
+	cur       sessionInfo
+	redialNow bool
 }
 
 // New returns an agent.
@@ -259,7 +278,8 @@ func New(o Options) (*Agent, error) {
 		disp = rpc.NewDispatcher()
 	}
 	return &Agent{cfg: o.Config, log: log, disp: disp, info: o.Info, http: client, sleep: sleep,
-		onJ: o.OnJoined, mets: o.Metrics, ports: o.Ports, wait: wait}, nil
+		onJ: o.OnJoined, mets: o.Metrics, ports: o.Ports, wait: wait,
+		onConf: o.OnConfigure, onEnd: o.OnSessionEnd, redialFast: o.RedialFast}, nil
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
@@ -373,7 +393,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.log.Info("controller is restarting; reconnecting shortly")
 			_ = a.sleep(ctx, 2*time.Second+time.Duration(rand.Intn(3000))*time.Millisecond)
 		default:
-			wait := a.retryDelay(err, &bo)
+			wait := a.redialDelay(err, a.retryDelay(err, &bo))
 			a.log.Warn("controller session ended", "err", describe(err), "retry_in", wait.Round(time.Second).String())
 			_ = a.sleep(ctx, wait)
 		}
@@ -458,6 +478,8 @@ func (a *Agent) session(ctx context.Context) error {
 	var collMu sync.Mutex
 	collectors := DefaultCollectors
 
+	a.beginSession()
+	defer a.endSession()
 	return link.Run(ctx, link.Options{
 		URL:         wsURL,
 		Subprotocol: Subprotocol,
@@ -477,6 +499,9 @@ func (a *Agent) session(ctx context.Context) error {
 			if m.Method != "agent.configure" {
 				a.log.Debug("notification from the controller", "method", m.Method)
 				return
+			}
+			if a.onConf != nil {
+				a.onConf(m.Params)
 			}
 			cfg, err := ParseConfigure(m.Params)
 			if err != nil {

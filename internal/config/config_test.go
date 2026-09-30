@@ -143,3 +143,43 @@ func TestBadControllerIsAnError(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// The Wi-Fi config plane's opt-in: none unless the file says otherwise
+// (the package's default file says read); only wireless and network are
+// ever allowed.
+func TestWifiConfigOptions(t *testing.T) {
+	load := func(text string) *Config {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "perch-apd")
+		os.WriteFile(path, []byte(text), 0o600)
+		c, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	c := load("config agent 'main'\n\toption controller 'https://perch.example.com'\n")
+	if c.WifiConfig != "none" || strings.Join(c.WifiConfigAllow, ",") != "wireless,network" || c.WifiConfigInsecure ||
+		c.WifiConfigConfirmMax != DefaultWifiConfigConfirmMax || !c.TransportVerified() {
+		t.Fatalf("without options: %+v", c)
+	}
+	c = load("config agent 'main'\n\toption controller 'http://192.168.1.10:8080'\n\toption wifi_config 'WRITE'\n" +
+		"\tlist wifi_config_allow 'wireless'\n\tlist wifi_config_allow 'dhcp'\n\tlist wifi_config_allow 'perch-apd'\n" +
+		"\toption wifi_config_insecure '1'\n\toption wifi_config_confirm_max '5000'\n")
+	if c.WifiConfig != "write" || strings.Join(c.WifiConfigAllow, ",") != "wireless" || strings.Join(c.WifiConfigIgnored, ",") != "dhcp,perch-apd" ||
+		!c.WifiConfigInsecure || c.WifiConfigConfirmMax != MaxWifiConfigConfirmMax || c.TransportVerified() {
+		t.Fatalf("with options: %+v", c)
+	}
+	c = load("config agent 'main'\n\toption controller 'https://perch.example.com'\n\toption tls_insecure '1'\n" +
+		"\toption wifi_config 'bogus'\n\toption wifi_config_allow 'network wireless'\n\toption wifi_config_confirm_max '1'\n")
+	if c.WifiConfig != "none" || strings.Join(c.WifiConfigAllow, ",") != "network,wireless" || c.WifiConfigConfirmMax != MinWifiConfigConfirmMax || c.TransportVerified() {
+		t.Fatalf("odd values: %+v", c)
+	}
+	// The package's default file: read (Wi-Fi design, decision D2).
+	path := filepath.Join(t.TempDir(), "perch-apd")
+	os.WriteFile(path, DefaultFile, 0o600)
+	if c, _ := Load(path); c.WifiConfig != "read" || strings.Join(c.WifiConfigAllow, ",") != "wireless,network" ||
+		c.WifiConfigInsecure || c.WifiConfigConfirmMax != 900 {
+		t.Fatalf("the package's default file: %+v", c)
+	}
+}

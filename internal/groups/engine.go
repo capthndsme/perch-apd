@@ -9,10 +9,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/capthndsme/perch-agentkit/openwrt/uci"
+	"github.com/capthndsme/perch-apd/internal/applylock"
 )
 
 // Runner runs a command (the reloads).
@@ -33,6 +35,19 @@ type Options struct {
 	WirelessPath, NetworkPath string
 	// StagingDir is where uci keeps uncommitted changes (/tmp/.uci).
 	StagingDir string
+	// RpcdDir is rpcd's state (/var/run/rpcd): LuCI's staged changes
+	// (uci-<session>/) and its apply-with-rollback snapshot
+	// (snapshot-files/).
+	RpcdDir string
+	// Lock is the AP's one write lock, shared with the Wi-Fi config plane
+	// and agent updates (nil = a lock of the engine's own: tests).
+	Lock *applylock.Lock
+	// Wrote, when set, is told after the engine wrote wireless or network
+	// (an apply or its rollback) with the SHA-256 (uci.FileHash) of each
+	// file it wrote, so the Wi-Fi config plane attributes the change to
+	// "groups-<revision>" instead of the router. Called with the engine's
+	// mutex held: it must not call back into the engine.
+	Wrote func(applyID string, hashes map[string]string)
 	// FS is where trunk detection reads /proc and /sys.
 	FS  FS
 	Run Runner
@@ -49,6 +64,8 @@ type Engine struct {
 	mu    sync.Mutex
 	st    state
 	timer *time.Timer
+	// hold is the write lock while an apply waits for its confirm.
+	hold *applylock.Hold
 }
 
 type state struct {
@@ -122,6 +139,12 @@ func New(o Options) (*Engine, error) {
 	if o.StagingDir == "" {
 		o.StagingDir = "/tmp/.uci"
 	}
+	if o.RpcdDir == "" {
+		o.RpcdDir = uci.RpcdDir
+	}
+	if o.Lock == nil {
+		o.Lock = applylock.New()
+	}
 	e := &Engine{o: o}
 	if err := os.MkdirAll(filepath.Join(o.StateDir, "rollback"), 0o700); err != nil {
 		return nil, err
@@ -146,6 +169,14 @@ func (e *Engine) Start(ctx context.Context) {
 	if e.st.Pending == nil {
 		return
 	}
+	// The window is still open: it holds the write lock again (nobody else
+	// can have it this early; if someone does, their window and this one
+	// overlapped before the restart and the files are whatever they are).
+	if hold, err := e.o.Lock.TryAcquire(applylock.Groups, applyID(e.st.Pending.Revision)); err == nil {
+		e.hold = hold
+	} else {
+		e.o.Log.Error("groups: a pending apply found the write lock taken", "revision", e.st.Pending.Revision, "err", err)
+	}
 	left := e.st.Pending.Deadline.Sub(e.o.Now())
 	if left <= 0 {
 		e.rollbackLocked(ctx, "the confirm window passed while the daemon was down")
@@ -166,6 +197,26 @@ func (e *Engine) armLocked(d time.Duration) {
 			e.rollbackLocked(context.Background(), "no confirm from the controller")
 		}
 	})
+}
+
+// applyID is the name the engine's writes carry for the Wi-Fi config plane
+// (its change log's author) and in the write lock.
+func applyID(revision int64) string { return fmt.Sprintf("groups-%d", revision) }
+
+func (e *Engine) releaseLocked() {
+	e.hold.Release()
+	e.hold = nil
+}
+
+func (e *Engine) wrote(revision int64, files map[string][]byte) {
+	if e.o.Wrote == nil || len(files) == 0 {
+		return
+	}
+	hashes := make(map[string]string, len(files))
+	for name, b := range files {
+		hashes[name] = uci.FileHash(b)
+	}
+	e.o.Wrote(applyID(revision), hashes)
 }
 
 func (e *Engine) persistLocked() {
@@ -199,10 +250,35 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 }
 
 // uncommitted reports a config with changes staged in uci but not committed
-// (a LuCI session): writing under it would mix the two.
+// (the uci CLI, or a LuCI session): writing under it would mix the two.
 func (e *Engine) uncommitted(name string) bool {
-	st, err := os.Stat(filepath.Join(e.o.StagingDir, name))
-	return err == nil && st.Size() > 0
+	staged := func(path string) bool {
+		st, err := os.Stat(path)
+		return err == nil && st.Mode().IsRegular() && st.Size() > 0
+	}
+	if staged(filepath.Join(e.o.StagingDir, name)) {
+		return true
+	}
+	sessions, _ := filepath.Glob(filepath.Join(e.o.RpcdDir, "uci-*"))
+	for _, dir := range sessions {
+		if staged(filepath.Join(dir, name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// luciPending reports a LuCI "apply with rollback" waiting for its confirm:
+// rpcd restores its snapshot unless confirmed, over anything written now.
+func (e *Engine) luciPending() bool {
+	entries, err := os.ReadDir(filepath.Join(e.o.RpcdDir, "snapshot-files"))
+	return err == nil && len(entries) > 0
+}
+
+func busy(reason, format string, args ...any) *Refusal {
+	r := refuse("busy", format, args...)
+	r.Reason = reason
+	return r
 }
 
 func readConfig(path, name string) ([]byte, *uci.Config, error) {
@@ -234,7 +310,25 @@ func (e *Engine) Apply(ctx context.Context, d Desired) (ApplyResult, error) {
 		if p.Revision == d.Revision {
 			return p.Result, nil
 		}
-		return ApplyResult{}, refuse("busy", "revision %d is waiting for its confirm", p.Revision)
+		return ApplyResult{}, busy(applylock.Groups.Reason(), "revision %d is waiting for its confirm", p.Revision)
+	}
+	if err := Validate(d); err != nil {
+		return ApplyResult{}, err
+	}
+	// The write lock from the snapshot to the confirm: no other writer
+	// (the Wi-Fi config plane, an update) may have a window open meanwhile.
+	hold, err := e.o.Lock.TryAcquire(applylock.Groups, applyID(d.Revision))
+	if err != nil {
+		return ApplyResult{}, busy(applylock.Reason(err), "%v", err)
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			hold.Release()
+		}
+	}()
+	if e.luciPending() {
+		return ApplyResult{}, busy("luci_pending", "a LuCI apply is waiting for its confirm: confirm or let it roll back first")
 	}
 	if e.uncommitted("wireless") || e.uncommitted("network") {
 		return ApplyResult{}, refuse("uncommitted", "the wireless or network config has uncommitted changes (a LuCI session): apply or revert them first")
@@ -304,24 +398,32 @@ func (e *Engine) Apply(ctx context.Context, d Desired) (ApplyResult, error) {
 	out.Deadline = deadline.UTC().Format(time.RFC3339)
 	e.st.Pending = &pending{Revision: d.Revision, Deadline: deadline, Ledger: res.Ledger, Network: nChanged,
 		BindingKeys: res.BindingKeys, Result: out}
+	// From here the window owns the lock; rollbackLocked or Confirm
+	// release it.
+	e.hold, keep = hold, true
 	e.persistLocked()
+	written := map[string][]byte{}
 	if wChanged {
 		if err := writeAtomic(e.o.WirelessPath, newW, fileMode(e.o.WirelessPath)); err != nil {
 			e.rollbackLocked(ctx, "writing the wireless config failed")
 			return ApplyResult{}, refuse("apply_failed", "writing %s: %v", e.o.WirelessPath, err)
 		}
+		written["wireless"] = newW
 	}
 	if nChanged {
 		if err := writeAtomic(e.o.NetworkPath, newN, fileMode(e.o.NetworkPath)); err != nil {
 			e.rollbackLocked(ctx, "writing the network config failed")
 			return ApplyResult{}, refuse("apply_failed", "writing %s: %v", e.o.NetworkPath, err)
 		}
+		written["network"] = newN
 	}
+	e.wrote(d.Revision, written)
 	if err := e.reload(ctx, nChanged); err != nil {
 		e.rollbackLocked(ctx, "the reload failed: "+err.Error())
 		return ApplyResult{}, refuse("apply_failed", "reloading: %v", err)
 	}
-	e.armLocked(time.Until(deadline))
+	// The engine's clock, not the wall clock: the deadline came from it.
+	e.armLocked(deadline.Sub(e.o.Now()))
 	e.o.Log.Info("groups: applied, waiting for the confirm", "revision", d.Revision,
 		"deadline", out.Deadline, "network", nChanged, "trunk", res.TrunkPort, "converted", res.Converted)
 	return out, nil
@@ -366,6 +468,7 @@ func (e *Engine) Confirm(ctx context.Context, revision int64) error {
 	e.st.Ledger = p.Ledger
 	e.st.Pending = nil
 	e.persistLocked()
+	e.releaseLocked()
 	rb := filepath.Join(e.o.StateDir, "rollback")
 	os.Remove(filepath.Join(rb, "wireless"))
 	os.Remove(filepath.Join(rb, "network"))
@@ -384,6 +487,7 @@ func (e *Engine) rollbackLocked(ctx context.Context, reason string) {
 		e.timer = nil
 	}
 	rb := filepath.Join(e.o.StateDir, "rollback")
+	restored := map[string][]byte{}
 	restore := func(name, path string) {
 		b, err := os.ReadFile(filepath.Join(rb, name))
 		if err != nil {
@@ -392,16 +496,20 @@ func (e *Engine) rollbackLocked(ctx context.Context, reason string) {
 		}
 		if err := writeAtomic(path, b, fileMode(path)); err != nil {
 			e.o.Log.Error("groups: restoring", "config", name, "err", err)
+			return
 		}
+		restored[name] = b
 	}
 	restore("wireless", e.o.WirelessPath)
 	restore("network", e.o.NetworkPath)
+	e.wrote(p.Revision, restored)
 	if err := e.reload(ctx, true); err != nil {
 		e.o.Log.Error("groups: reload after the rollback", "err", err)
 	}
 	e.st.LastRollback = &rollback{Revision: p.Revision, At: e.o.Now().UTC(), Reason: reason}
 	e.st.Pending = nil
 	e.persistLocked()
+	e.releaseLocked()
 	e.o.Log.Warn("groups: rolled back", "revision", p.Revision, "reason", reason)
 }
 
@@ -428,5 +536,70 @@ func (e *Engine) State(ctx context.Context) StateResult {
 			out.Issues = append(out.Issues, fmt.Sprintf("stations: %v", err))
 		}
 	}
+	return out
+}
+
+// OwnedView is what the groups engine holds on the AP, for the Wi-Fi
+// config plane to keep out of its own model (reads mark these sections
+// `owner: "groups"`).
+type OwnedView struct {
+	// Sections are the names of the sections the engine created, in
+	// wireless and network, sorted.
+	Sections []string `json:"sections"`
+	// DynamicVLAN are the wifi-iface sections whose dynamic_vlan the engine
+	// set, sorted.
+	DynamicVLAN []string `json:"dynamicVlan"`
+	// Converted is the bridge the engine converted to VLAN filtering ("" =
+	// none).
+	Converted string `json:"converted,omitempty"`
+	// Pending: an apply is waiting for its confirm (its sections are
+	// included).
+	Pending bool `json:"pending"`
+}
+
+// Owned reports the sections and options the engine holds: the confirmed
+// ledger's, plus a pending apply's (the files hold those until its window
+// closes). A ledger from before the engine recorded names falls back to
+// the naming patterns over the current files.
+func (e *Engine) Owned() OwnedView {
+	e.mu.Lock()
+	ledgers := []Ledger{e.st.Ledger}
+	pending := e.st.Pending != nil
+	if pending {
+		ledgers = append(ledgers, e.st.Pending.Ledger)
+	}
+	e.mu.Unlock()
+	sections, dyn := map[string]bool{}, map[string]bool{}
+	out := OwnedView{Sections: []string{}, DynamicVLAN: []string{}, Pending: pending}
+	var w, n *uci.Config
+	for _, l := range ledgers {
+		if l.Owned == nil && w == nil {
+			_, w, _ = readConfig(e.o.WirelessPath, "wireless")
+			_, n, _ = readConfig(e.o.NetworkPath, "network")
+			if w == nil {
+				w = &uci.Config{Name: "wireless"}
+			}
+			if n == nil {
+				n = &uci.Config{Name: "network"}
+			}
+		}
+		for name := range ownedSet(l, w, n) {
+			sections[name] = true
+		}
+		for name := range l.DynamicVLAN {
+			dyn[name] = true
+		}
+		if l.Converted != nil {
+			out.Converted = l.Converted.Bridge
+		}
+	}
+	for name := range sections {
+		out.Sections = append(out.Sections, name)
+	}
+	for name := range dyn {
+		out.DynamicVLAN = append(out.DynamicVLAN, name)
+	}
+	sort.Strings(out.Sections)
+	sort.Strings(out.DynamicVLAN)
 	return out
 }

@@ -4,9 +4,11 @@
 // the VLANs they land in (`wifi-vlan`), and the plumbing that carries those
 // VLANs tagged to the gateway over the AP's trunk port.
 //
-// Perch owns every section it writes (`perch_*` names) and nothing else.
-// Where it must touch a section it does not own it records the old value
-// in a ledger and puts it back when no longer needed:
+// Perch owns the sections it creates (their names are in the ledger, below)
+// and nothing else: other `perch_*` sections belong to the Wi-Fi config
+// plane (`perch_n*`) and are never touched here. Where it must touch a
+// section it does not own it records the old value in the ledger and puts
+// it back when no longer needed:
 //
 //   - `dynamic_vlan '1'` on the managed `wifi-iface`s (hostapd assigns the
 //     VLANs only with it);
@@ -51,8 +53,17 @@ type Station struct {
 	MACs []string `json:"macs,omitempty"`
 }
 
-// Ledger is what Perch changed in sections it does not own.
+// Ledger is what the groups engine created, and what it changed in
+// sections it does not own.
 type Ledger struct {
+	// Owned are the names of the sections the engine created (in wireless
+	// and network). The next plan removes exactly these before it writes
+	// its own; every other section, `perch_*` or not, stays. nil = a ledger
+	// written before the engine recorded them (or none yet): the names are
+	// then the ones matching the engine's naming patterns (OwnedName). A
+	// plan always records a list, `[]` when it created nothing, so the two
+	// cases survive state.json.
+	Owned []string `json:"owned"`
 	// DynamicVLAN: wifi-iface section → its dynamic_vlan before Perch set it
 	// ("" = it had none).
 	DynamicVLAN map[string]string `json:"dynamicVlan,omitempty"`
@@ -94,6 +105,9 @@ type Result struct {
 type Refusal struct {
 	Code    string
 	Message string
+	// Reason qualifies a `busy` refusal: groups_pending, plane_pending,
+	// update_pending, luci_pending.
+	Reason string
 }
 
 func (r *Refusal) Error() string { return r.Message }
@@ -102,16 +116,47 @@ func refuse(code, format string, args ...any) *Refusal {
 	return &Refusal{Code: code, Message: fmt.Sprintf(format, args...)}
 }
 
-// Prefix of every section Perch owns.
+// Prefix of the sections the engine creates.
 const Prefix = "perch_"
+
+// OwnedName reports whether name is one the groups engine creates:
+// perch_ws<n> (wifi-station), perch_wv<vid>_<iface> (wifi-vlan),
+// perch_v<vid> (interface), perch_bv<vid> and perch_bvu (bridge-vlan),
+// perch_dv<vid> and perch_bd<vid> (devices), i.e.
+// ^perch_(ws\d+|wv\d+_\w+|v\d+|bv\d+|bvu|dv\d+|bd\d+)$. The Wi-Fi config
+// plane's names (perch_n<id>_<radio>, perch_nv<vid>, perch_nbv<vid>,
+// perch_nbvu) never match.
+func OwnedName(name string) bool {
+	rest, ok := strings.CutPrefix(name, Prefix)
+	if !ok {
+		return false
+	}
+	if rest == "bvu" {
+		return true
+	}
+	for _, p := range []string{"ws", "bv", "dv", "bd", "v"} {
+		if n, ok := strings.CutPrefix(rest, p); ok && allDigits(n) {
+			return true
+		}
+	}
+	if n, ok := strings.CutPrefix(rest, "wv"); ok {
+		vid, iface, found := strings.Cut(n, "_")
+		return found && allDigits(vid) && iface != "" && strings.Trim(iface, wordChars) == ""
+	}
+	return false
+}
+
+const wordChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+
+func allDigits(s string) bool {
+	return s != "" && strings.Trim(s, "0123456789") == ""
+}
 
 // MaxVLANs and MaxStations bound one desired state.
 const (
 	MaxVLANs    = 256
 	MaxStations = 4096
 )
-
-func isPerch(s *uci.Section) bool { return strings.HasPrefix(s.Name, Prefix) }
 
 func str(s *uci.Section, name string) string {
 	if v, ok := s.Get(name); ok {
@@ -236,13 +281,29 @@ func Plan(wireless, network *uci.Config, d Desired, f Facts, prev Ledger) (*Resu
 		return nil, err
 	}
 	w, n := wireless.Clone(), network.Clone()
-	undo(w, n, prev)
+	kept := undo(w, n, prev)
 
-	res := &Result{Wireless: w, Network: n, Ledger: Ledger{DynamicVLAN: map[string]string{}}}
+	p := &planner{}
+	res := &Result{Wireless: w, Network: n, Ledger: Ledger{DynamicVLAN: map[string]string{}, Converted: kept}}
+	if kept != nil {
+		// The bridge stays converted: it carries VLANs that are not the
+		// groups' (undo).
+		res.Converted = true
+		res.Bridge = kept.Bridge
+	}
+	owned := func() []string {
+		out := append([]string{}, p.created...)
+		if kept != nil {
+			out = append(out, Prefix+"bvu")
+		}
+		return out
+	}
 	if len(d.VLANs) == 0 {
-		// Nothing to carry: Perch holds no sections and changes nothing.
+		// Nothing to carry: the groups hold no sections and change nothing
+		// (but a conversion other VLANs now depend on).
 		finish(w, n)
 		res.Ledger.DynamicVLAN = nil
+		res.Ledger.Owned = owned()
 		return res, nil
 	}
 
@@ -290,37 +351,47 @@ func Plan(wireless, network *uci.Config, d Desired, f Facts, prev Ledger) (*Resu
 	sort.Ints(vids)
 
 	bridge := bridgeOf(n, port)
-	res.Bridge = ""
 	if bridge != nil {
 		name := str(bridge, "name")
 		res.Bridge = name
-		if len(bridgeVLANs(n, name)) == 0 {
-			conv, err := convert(n, bridge, vids, prev.Converted)
+		switch {
+		case kept != nil && kept.Bridge == name:
+			// Still converted from before. Its untagged VLAN cannot also
+			// be a group's.
+			for _, v := range vids {
+				if v == kept.UntaggedVLAN {
+					return nil, refuse("untagged_vlan_conflict", "VLAN %d carries %s's untagged traffic since Perch converted it", v, name)
+				}
+			}
+		case len(bridgeVLANs(n, name)) == 0:
+			if kept != nil {
+				return nil, refuse("conversion_conflict", "Perch keeps %s converted for other VLANs and cannot also convert %s", kept.Bridge, name)
+			}
+			conv, err := convert(p, n, bridge, vids, prev.Converted)
 			if err != nil {
 				return nil, err
 			}
 			res.Ledger.Converted = conv
 			res.Converted = true
-		} else if prev.Converted != nil && prev.Converted.Bridge == name {
-			// Still converted from before (undo only runs when not needed).
-			res.Ledger.Converted = prev.Converted
-			res.Converted = true
 		}
 		for _, v := range vids {
-			if hasVLAN(n, name, v) {
-				// The router carries it already (not Perch's): use it as is,
-				// but make sure the trunk port is in it tagged.
+			if s := routerVLAN(n, name, v, p); s != nil {
+				// Someone else (the router, the Wi-Fi config plane) carries
+				// it already: use it as it is.
 				res.Issues = append(res.Issues, fmt.Sprintf("VLAN %d is already on %s; Perch adds nothing to it", v, name))
+				if !taggedMember(s, port) {
+					res.Issues = append(res.Issues, fmt.Sprintf("VLAN %d on %s does not carry %s tagged: its clients may not reach the gateway", v, name, port))
+				}
 				continue
 			}
-			add(n, "bridge-vlan", fmt.Sprintf("%sbv%d", Prefix, v), []uci.Option{
+			p.add(n, "bridge-vlan", fmt.Sprintf("%sbv%d", Prefix, v), []uci.Option{
 				{Name: "device", Value: uci.String(name)},
 				{Name: "vlan", Value: uci.String(strconv.Itoa(v))},
 				{Name: "ports", Value: uci.List(port + ":t")},
 			})
 		}
 		for _, v := range vids {
-			add(n, "interface", fmt.Sprintf("%sv%d", Prefix, v), []uci.Option{
+			p.add(n, "interface", fmt.Sprintf("%sv%d", Prefix, v), []uci.Option{
 				{Name: "proto", Value: uci.String("none")},
 				{Name: "device", Value: uci.String(fmt.Sprintf("%s.%d", name, v))},
 			})
@@ -330,18 +401,18 @@ func Plan(wireless, network *uci.Config, d Desired, f Facts, prev Ledger) (*Resu
 		for _, v := range vids {
 			vdev := fmt.Sprintf("%s.%d", port, v)
 			br := fmt.Sprintf("br-pv%d", v)
-			add(n, "device", fmt.Sprintf("%sdv%d", Prefix, v), []uci.Option{
+			p.add(n, "device", fmt.Sprintf("%sdv%d", Prefix, v), []uci.Option{
 				{Name: "type", Value: uci.String("8021q")},
 				{Name: "ifname", Value: uci.String(port)},
 				{Name: "vid", Value: uci.String(strconv.Itoa(v))},
 				{Name: "name", Value: uci.String(vdev)},
 			})
-			add(n, "device", fmt.Sprintf("%sbd%d", Prefix, v), []uci.Option{
+			p.add(n, "device", fmt.Sprintf("%sbd%d", Prefix, v), []uci.Option{
 				{Name: "type", Value: uci.String("bridge")},
 				{Name: "name", Value: uci.String(br)},
 				{Name: "ports", Value: uci.List(vdev)},
 			})
-			add(n, "interface", fmt.Sprintf("%sv%d", Prefix, v), []uci.Option{
+			p.add(n, "interface", fmt.Sprintf("%sv%d", Prefix, v), []uci.Option{
 				{Name: "proto", Value: uci.String("none")},
 				{Name: "device", Value: uci.String(br)},
 			})
@@ -362,7 +433,7 @@ func Plan(wireless, network *uci.Config, d Desired, f Facts, prev Ledger) (*Resu
 	// A wifi-vlan per VLAN and managed interface.
 	for _, m := range managed {
 		for _, v := range vids {
-			add(w, "wifi-vlan", fmt.Sprintf("%swv%d_%s", Prefix, v, shortName(m.name)), []uci.Option{
+			p.add(w, "wifi-vlan", fmt.Sprintf("%swv%d_%s", Prefix, v, shortName(m.name)), []uci.Option{
 				{Name: "iface", Value: uci.String(m.name)},
 				{Name: "name", Value: uci.String("g" + strconv.Itoa(v))},
 				{Name: "vid", Value: uci.String(strconv.Itoa(v))},
@@ -401,20 +472,24 @@ func Plan(wireless, network *uci.Config, d Desired, f Facts, prev Ledger) (*Resu
 				{Name: "vid", Value: uci.String(strconv.Itoa(st.VID))},
 			}
 			if len(macs) == 0 {
-				add(w, "wifi-station", fmt.Sprintf("%sws%d", Prefix, idx), opts)
+				p.add(w, "wifi-station", fmt.Sprintf("%sws%d", Prefix, idx), opts)
 				idx++
 				continue
 			}
 			for _, mac := range macs {
 				withMAC := append(append([]uci.Option(nil), opts...), uci.Option{Name: "mac", Value: uci.String(mac)})
-				add(w, "wifi-station", fmt.Sprintf("%sws%d", Prefix, idx), withMAC)
+				p.add(w, "wifi-station", fmt.Sprintf("%sws%d", Prefix, idx), withMAC)
 				idx++
 			}
 		}
 	}
+	if p.taken != "" {
+		return nil, refuse("name_taken", "a section named %s exists that the groups engine did not create: rename or delete it", p.taken)
+	}
 	if len(res.Ledger.DynamicVLAN) == 0 {
 		res.Ledger.DynamicVLAN = nil
 	}
+	res.Ledger.Owned = owned()
 	finish(w, n)
 	return res, nil
 }
@@ -431,8 +506,34 @@ func shortName(s string) string {
 	return string(out)
 }
 
-func add(c *uci.Config, typ, name string, opts []uci.Option) {
+// planner adds the plan's sections and remembers their names (the next
+// ledger's Owned).
+type planner struct {
+	created []string
+	// taken: a name the plan needs that a section it does not own holds.
+	taken string
+}
+
+func (p *planner) add(c *uci.Config, typ, name string, opts []uci.Option) {
+	if c.Section(name) != nil {
+		// Two sections of one name would merge in libuci. undo removed
+		// every section the engine owns, so this one is someone else's.
+		if p.taken == "" {
+			p.taken = c.Name + "." + name
+		}
+		return
+	}
 	c.Sections = append(c.Sections, &uci.Section{Name: name, Type: typ, Options: opts})
+	p.created = append(p.created, name)
+}
+
+func (p *planner) createdHere(name string) bool {
+	for _, n := range p.created {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 func finish(w, n *uci.Config) {
@@ -440,16 +541,52 @@ func finish(w, n *uci.Config) {
 	n.Reindex()
 }
 
-// undo removes Perch's sections and puts back what the ledger recorded.
-func undo(w, n *uci.Config, prev Ledger) {
-	drop := func(c *uci.Config) {
-		kept := c.Sections[:0]
+// ownedSet is the names the engine created according to the ledger, or by
+// pattern for a ledger without the list.
+func ownedSet(prev Ledger, w, n *uci.Config) map[string]bool {
+	out := map[string]bool{}
+	if prev.Owned != nil {
+		for _, name := range prev.Owned {
+			out[name] = true
+		}
+		return out
+	}
+	for _, c := range []*uci.Config{w, n} {
 		for _, s := range c.Sections {
-			if !isPerch(s) {
-				kept = append(kept, s)
+			if !s.Anonymous && OwnedName(s.Name) {
+				out[s.Name] = true
 			}
 		}
-		c.Sections = kept
+	}
+	return out
+}
+
+// undo removes the engine's sections and puts back what the ledger
+// recorded. A bridge conversion stays while the bridge carries a VLAN the
+// engine does not own (the router's, or one the Wi-Fi config plane added
+// after the conversion): moving its interfaces back would break those. It
+// returns that conversion (nil when undone or there was none).
+func undo(w, n *uci.Config, prev Ledger) (kept *Conversion) {
+	owned := ownedSet(prev, w, n)
+	if c := prev.Converted; c != nil {
+		for _, s := range bridgeVLANs(n, c.Bridge) {
+			if !owned[s.Name] {
+				kept = c
+				break
+			}
+		}
+		if kept != nil {
+			delete(owned, Prefix+"bvu")
+		}
+	}
+	drop := func(c *uci.Config) {
+		out := c.Sections[:0]
+		for _, s := range c.Sections {
+			if s.Anonymous || !owned[s.Name] {
+				out = append(out, s)
+			}
+		}
+		c.Sections = out
 	}
 	drop(w)
 	drop(n)
@@ -462,7 +599,7 @@ func undo(w, n *uci.Config, prev Ledger) {
 			}
 		}
 	}
-	if c := prev.Converted; c != nil {
+	if c := prev.Converted; c != nil && kept == nil {
 		for name, dev := range c.Moved {
 			if s := n.Section(name); s != nil && str(s, "device") == fmt.Sprintf("%s.%d", c.Bridge, c.UntaggedVLAN) {
 				s.Set("device", uci.String(dev))
@@ -471,6 +608,7 @@ func undo(w, n *uci.Config, prev Ledger) {
 	}
 	w.Reindex()
 	n.Reindex()
+	return kept
 }
 
 // bridgeOf is the bridge device section that has port among its ports.
@@ -498,9 +636,24 @@ func bridgeVLANs(n *uci.Config, bridge string) []*uci.Section {
 	return out
 }
 
-func hasVLAN(n *uci.Config, bridge string, vid int) bool {
+// routerVLAN is a bridge-vlan for vid on bridge that this plan did not
+// create (undo already removed the engine's own): the router's, or the
+// Wi-Fi config plane's.
+func routerVLAN(n *uci.Config, bridge string, vid int, p *planner) *uci.Section {
 	for _, s := range bridgeVLANs(n, bridge) {
-		if str(s, "vlan") == strconv.Itoa(vid) && !isPerch(s) {
+		if str(s, "vlan") == strconv.Itoa(vid) && !p.createdHere(s.Name) {
+			return s
+		}
+	}
+	return nil
+}
+
+// taggedMember reports whether a bridge-vlan carries port tagged (netifd:
+// `<port>[:t|:u][*]`, tagged without `:u`).
+func taggedMember(s *uci.Section, port string) bool {
+	for _, p := range listOf(s, "ports") {
+		name, flags, _ := strings.Cut(p, ":")
+		if name == port && !strings.Contains(flags, "u") {
 			return true
 		}
 	}
@@ -510,7 +663,7 @@ func hasVLAN(n *uci.Config, bridge string, vid int) bool {
 // convert turns an untagged bridge into a VLAN-filtering one: its ports
 // untagged on the untagged VLAN (1, else the smallest free one), and the
 // interfaces on the bare bridge onto `<bridge>.<untagged>`.
-func convert(n *uci.Config, bridge *uci.Section, vids []int, prev *Conversion) (*Conversion, error) {
+func convert(p *planner, n *uci.Config, bridge *uci.Section, vids []int, prev *Conversion) (*Conversion, error) {
 	name := str(bridge, "name")
 	used := map[int]bool{}
 	for _, v := range vids {
@@ -527,20 +680,20 @@ func convert(n *uci.Config, bridge *uci.Section, vids []int, prev *Conversion) (
 		return nil, refuse("no_untagged_vlan", "no VLAN id is left for %s's untagged traffic", name)
 	}
 	var ports []string
-	for _, p := range listOf(bridge, "ports") {
-		ports = append(ports, p+":u*")
+	for _, port := range listOf(bridge, "ports") {
+		ports = append(ports, port+":u*")
 	}
 	if len(ports) == 0 {
 		return nil, refuse("bridge_empty", "%s has no ports to carry", name)
 	}
-	add(n, "bridge-vlan", Prefix+"bvu", []uci.Option{
+	p.add(n, "bridge-vlan", Prefix+"bvu", []uci.Option{
 		{Name: "device", Value: uci.String(name)},
 		{Name: "vlan", Value: uci.String(strconv.Itoa(untagged))},
 		{Name: "ports", Value: uci.List(ports...)},
 	})
 	conv := &Conversion{Bridge: name, UntaggedVLAN: untagged, Moved: map[string]string{}}
 	for _, s := range n.OfType("interface") {
-		if isPerch(s) {
+		if p.createdHere(s.Name) {
 			continue
 		}
 		if str(s, "device") == name {

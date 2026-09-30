@@ -43,6 +43,8 @@ PKG_BUILD_FLAGS:=no-mips16
 GO_PKG:=github.com/capthndsme/perch-apd
 GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/perch-apd
 GO_PKG_LDFLAGS:=-s -w
+# HTTP/1.1 only, without net/http's bundled HTTP/2 (the Makefile's TAGS).
+GO_PKG_TAGS:=nethttpomithttp2
 GO_PKG_LDFLAGS_X:=$(GO_PKG)/internal/version.Version=$(PERCH_VERSION)
 
 include $(INCLUDE_DIR)/package.mk
@@ -65,6 +67,11 @@ define Package/perch-apd/description
   WebSocket session to the controller for kick, steer, locate (LED blink)
   and reboot. Joins with a token from the dashboard:
   perch-apd join --controller <url> --token <token>
+  The controller can also manage the AP's Wi-Fi (networks, radios,
+  roaming) when the AP allows it (option wifi_config: read by default,
+  write to allow changes): every change is rolled back unless the AP
+  reaches the controller again and its radios and networks come up, also
+  across a reboot (the perch-apd-guard boot script).
 endef
 
 define Package/perch-apd/conffiles
@@ -76,11 +83,33 @@ endef
 # "start" in default_postinst leaves a running procd service alone: without a
 # restart the old version keeps running, and holds its deleted binary's flash.
 # No exit here: apk inlines this after default_postinst in the same script.
+# The boot guard runs before the network at every boot: enabled on upgrades
+# too (default_postinst enables a package's init scripts on a first install
+# only, so an upgrade from a version without the guard would leave it off).
 define Package/perch-apd/postinst
 #!/bin/sh
+if [ -z "$${IPKG_INSTROOT}" ]; then
+	/etc/init.d/perch-apd-guard enable
+fi
 if [ -z "$${IPKG_INSTROOT}" ] && [ "$${PKG_UPGRADE}" = "1" ] && /etc/init.d/perch-apd running; then
 	/etc/init.d/perch-apd restart
 fi
+endef
+
+# Removing the package (not upgrading it) drops the Wi-Fi config plane's
+# state; a change still waiting for its confirm is restored first, as at a
+# reboot, so the AP is never left with an unconfirmed change and no guard.
+define Package/perch-apd/prerm
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] && exit 0
+[ "$${PKG_UPGRADE}" = "1" ] && exit 0
+if [ -f /etc/perch-apd/plane/rollback/pending.json ]; then
+	/etc/init.d/perch-apd stop 2>/dev/null
+	rm -f /var/run/perch-apd/apply-*
+	/usr/bin/perch-apd config-guard 2>&1 | logger -t perch-apd
+	/etc/init.d/network reload
+fi
+exit 0
 endef
 
 define Package/perch-apd/install
@@ -88,8 +117,11 @@ define Package/perch-apd/install
 	$(INSTALL_BIN) $(GO_PKG_BUILD_BIN_DIR)/perch-apd $(1)/usr/bin/perch-apd
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/perch-apd.init $(1)/etc/init.d/perch-apd
+	$(INSTALL_BIN) ./files/perch-apd-guard.init $(1)/etc/init.d/perch-apd-guard
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/perch-apd.config $(1)/etc/config/perch-apd
+	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
+	$(INSTALL_DATA) ./files/perch-apd.keep $(1)/lib/upgrade/keep.d/perch-apd
 endef
 
 $(eval $(call GoBinPackage,perch-apd))

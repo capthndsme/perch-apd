@@ -216,7 +216,9 @@ calls `system.info`.
 `metrics` (pushes, §2.3) always; `clients` when nl80211 is reachable; `kick` when hostapd
 exposes `hostapd.<ifname>` on ubus; `locate` when `/sys/class/leds` has LEDs;
 `reboot` on OpenWrt; `ports` (1.0.0 and later) when the pushes carry the Ethernet ports
-(`option ports '1'`, the default) and the device has at least one. `band` in
+(`option ports '1'`, the default) and the device has at least one; `wifi_config` (1.2.0 and
+later) in every build with the Wi-Fi config plane, whatever the AP allows: the result then
+also carries `wifiConfig`, the plane's hello (§2.5). `band` in
 `interfaces` is `2.4`, `5`, `6` or `60` (the server's convention); `band` in `radios`
 is UCI's (`2g`, `5g`, `6g`, `60g`).
 
@@ -294,16 +296,28 @@ carried tagged to the gateway over the trunk port.
 A station without `key` is a binding: the MACs keep the SSID's own passphrase but land in
 the VLAN, one `wifi-station` per MAC with a single `option mac` (OpenWrt 24.10 reads `mac` as a
 string and drops a `list`; 25.12 splits the option into its array). A group key equal to a
-managed interface's own passphrase is skipped with an issue. The agent writes only its own sections (`perch_*`)
-plus `dynamic_vlan '1'` on the managed `wifi-iface`s; a trunk port inside an untagged bridge
+managed interface's own passphrase is skipped with an issue. The agent writes only the sections it
+creates plus `dynamic_vlan '1'` on the managed `wifi-iface`s; a trunk port inside an untagged bridge
 converts that bridge to VLAN filtering (its interfaces move to `<bridge>.1`). What it changed
-in sections it does not own is recorded and put back when no longer needed. `trunk: "auto"`
+in sections it does not own is recorded and put back when no longer needed.
+The names it creates are `perch_ws<n>`, `perch_wv<vid>_<iface>`, `perch_v<vid>`, `perch_bv<vid>`,
+`perch_bvu`, `perch_dv<vid>`, `perch_bd<vid>`; its state records which ones it created, and each apply
+removes exactly those (a state written before 1.2 falls back to these patterns). Any other section,
+including other `perch_*` ones (the Wi-Fi config plane's `perch_n*`), is never removed or changed. A
+VLAN another section already carries on the bridge is used as it is (an issue says so, and another if
+the trunk port is not a tagged member of it); a converted bridge stays converted while it carries a
+VLAN the groups did not create. A section of one of these names that the groups did not create
+refuses the apply with `name_taken`. `trunk: "auto"`
 is the bridge port behind which the default gateway's MAC is learned
 (`/sys/class/net/<bridge>/brforward`), or the default route's own port.
 
 Result: `{revision, state: "pending_confirm" | "noop", deadline, trunkPort, bridge, converted,
 managed[], issues[]}`. The same revision again answers the same; another one while an apply
-waits is `busy`. Unless `groups.confirm {revision}` arrives before `deadline`
+waits is `busy` with `data.reason` `groups_pending`. An apply holds the AP's one write lock from
+its snapshot until the confirm or the rollback, the lock the Wi-Fi config plane and agent updates
+take too: while one of them has a window open, `groups.apply` is `busy` with `data.reason`
+`plane_pending` or `update_pending` (nothing is written; the controller retries), and while a LuCI
+apply-with-rollback waits for its confirm, `busy` / `luci_pending`. Unless `groups.confirm {revision}` arrives before `deadline`
 (`confirmSeconds`, 30-600, default 120) the agent restores the previous `wireless` and
 `network` byte for byte and reloads (also at start when the window passed while it was down).
 Before it keeps a revision, `groups.confirm` reads back hostapd's PSK files
@@ -311,8 +325,9 @@ Before it keeps a revision, `groups.confirm` reads back hostapd's PSK files
 binding that lost its MAC on the way to hostapd, which would put every client of the SSID in
 that VLAN) rolls back at once and refuses the confirm with `unsafe_binding`.
 Refusals (`-32000`, `data.error`): `no_managed_iface`, `trunk_unknown`, `uncommitted`
-(changes staged in LuCI), `busy`, `apply_failed`, `not_pending`, `unsafe_binding`; `-32602`
-`bad_params`.
+(changes staged with the uci CLI or in a LuCI session), `busy` (+ `data.reason`), `apply_failed`,
+`not_pending`, `unsafe_binding`, `name_taken`, `untagged_vlan_conflict` (a group on the untagged VLAN
+of a bridge the groups keep converted), `conversion_conflict`; `-32602` `bad_params`.
 
 `groups.state` → `{appliedRevision, pending: {revision, deadline} | null, lastRollback?,
 trunkPort, stations: [{mac, vid, ifname}], issues[]}`: `stations` are the clients on group
@@ -337,6 +352,7 @@ session and again whenever the AP's poll interval or enabled flag changes:
 |---|---|
 | `metricsIntervalSeconds` | push period; `0` pauses pushing (AP disabled in the dashboard). The agent clamps it to 1–3600 s. |
 | `collectors` | which collectors to include (optional; default the list above). Names: `openwrt`, `uname`, `time`, `stat`, `loadavg`, `meminfo`, `netdev`, `netclass`, `conntrack`, `filefd`, `entropy`, `wifi`, `wifi_stations`; unknown names are ignored. |
+| `wifiConfig` | (1.2.0 and later) the Wi-Fi config plane's mode for this session (§2.5); absent = off |
 
 **Agent → server: `metrics.push`** (notification): the first right after the
 first `agent.configure`, then one per interval, measured from the start of the
@@ -402,9 +418,130 @@ An older controller ignores `ports` (it reads only `format`, `text` and `duratio
 | Method | Params | |
 |---|---|---|
 | `locate.ended` | `{"reason": "timeout" \| "stopped"}` | LEDs restored |
+| `wifi.config.changed` | `{hashes, changed, origin, applyId?, author, at, uncommitted}` | §2.5 |
+| `wifi.config.result` | `{applyId, kind, outcome, reason, at, hashes, discarded?, health?, detail?}` | §2.5 |
+| `wifi.health.changed` | `{at, ok, problems}` | §2.5 |
 
 The server ignores notifications it does not know; agents ignore requests they
 do not know with -32601.
+
+### 2.5 The Wi-Fi config plane (`wifi.*`, 1.2.0 and later)
+
+The controller reads the AP's `/etc/config/wireless` and `/etc/config/network` (secrets only
+as fingerprints), hears about every change with who likely made it, and, when the AP allows
+it, changes them with a confirm window: the same config plane as the gateway's (controller
+`docs/gateway/config-plane.md`), from perch-agentkit's `openwrt/plane`, with a health check of
+the AP's own. Only these two configs are ever read or written.
+
+**The owner's opt-in**, in `/etc/config/perch-apd` (the controller can never write that file):
+
+| Option | Default | |
+|---|---|---|
+| `wifi_config` | `none` without the option; the package's file says `read` | `none`: every `wifi.*` answers `-32001` `{"error":"wifi_config_off"}`; `read`: reads and change notifications; `write`: changes too. Also `-32001` off OpenWrt. `perch-apd wifi access none\|read\|write` sets it and restarts the daemon. |
+| `wifi_config_allow` | `wireless`, `network` | a list; any other name is ignored (logged) |
+| `wifi_config_insecure` | `0` | `1`: writes over plain `ws://` or an unverified certificate are accepted when signed with a paired key (pairing comes with a later release; until then such writes are refused `not_paired`) |
+| `wifi_config_confirm_max` | `900` | upper bound of every confirm window, 30–1800 s |
+
+Writes also need an `https` controller with the certificate verified (`tls_insecure '0'`;
+`ca_file` counts as verified), else `insecure_transport`, and the controller's mode `managed`
+(else `not_managed`).
+
+**Hello.** `system.info` carries `wifiConfig`: `{protocol: 1, access, accessConfigured?,
+transportOk, allowInsecure, allowedConfigs, hashes: {wireless, network, perch-managed},
+apply: {state: idle | applying | pending_confirm | rolling_back, applyId?, kind?, deadline?,
+protected?, health?: pending | ok | failed}, results: [outcomes not acknowledged, ≤ 32],
+signing?: {required, challenge, key, keyId?, windowSeconds}, management?: {network, device,
+radios, controllerAddress, reportedAt}, groups: {engine, enabled, state: idle |
+pending_confirm, handedOver}}`. Its `hashes` are the baseline of the notifications that follow;
+`challenge` is new for every session.
+
+**Mode.** `agent.configure` carries `wifiConfig: {mode: off | observe | managed, authoritative,
+watchSeconds (10–600, default 30), debounceSeconds (1–60, 5), healthWaitSeconds (10–300, 45),
+fingerprintKey (64 hex)}` at the start of every session and when the mode or the settings
+change. Without it (an older controller), and after a session ends, the mode is `off`: no
+watching, no applies; confirm, rollback and ack still work.
+
+**Methods** (errors `-32000` with `data.error`, `-32602` `bad_params`):
+
+| Method | Params → result |
+|---|---|
+| `wifi.capabilities` | `{}` → the plane's part (`protocol, access, allowedConfigs, transportOk, allowInsecure, confirmMaxSeconds, backend: "ubus" \| "uci-cli" \| null, configs, hashes, uncommitted, luciPending, apply, signing?, management`) and the Wi-Fi facts of `perch-apd wifi caps` (`openwrt, packageManager, packages, wifiScripts, schema, hostapd {binary, variant, ubus, features}, regulatory, radios [...], trunk, networks`), plus `guard: "installed" \| "self_installed" \| "missing"` and `groups: {engine, enabled, state, appliedRevision, owned, handedOver}` |
+| `wifi.config.read` | `{configs?}` → `{readAt, configs: [{name, hash, missing?, sections: [{name, type, anonymous, index, options, secrets?, hash, owner?}]}], ledger, uncommitted, luciPending, groupsOwned: {dynamicVlan}}`. Secrets are unbound fingerprints: `"hmac:" + 16 hex` of HMAC-SHA256(fingerprintKey, `"<config>.*.<option>=<value>"`), equal for one value on every section and AP (key 32 × `0x44`, `wireless.*.key=correct horse battery` → `hmac:ac349a3eb980336c`). `owner: "groups"` marks the device groups' sections. Refusals `config_not_allowed`, `read_too_large` (a file over 2 MiB or 2000 sections), `read_failed` |
+| `wifi.config.apply` | `{applyId (a<apId>-<12 hex>), kind: apply \| revert \| adopt, protected?, confirmTimeoutSeconds?, dryRun?, base, ops, ledger, secrets?, cacAllowanceSeconds?, guards?, expect?: {bss, radios}}` → `{state: pending_confirm \| applied \| noop \| dry_run, applyId, deadline, confirmTimeoutSeconds, protected, hashes, reload: wifi \| network \| none, changes?}`. The ops are the gateway's (`put` / `adopt` / `delete` / `order`, `{"$keep":true}`, `{"$secret":ref}`), at most 2000, and at most 64 secrets (plain strings over verified TLS only). |
+| `wifi.config.confirm` | `{applyId}` → `{state: "confirmed", applyId, hashes, health}` |
+| `wifi.config.rollback` | `{applyId}` → `{state: "rolling_back", applyId}` (the restore runs after the reply) |
+| `wifi.config.ack` | `{applyIds}` → `{acked}`: those results leave the hello |
+| `wifi.health` | `{}` → the Wi-Fi as it runs, judged against the committed config: `{checkedAt, ok, pending, radios: [{section, up, pending?, disabled?, retrySetupFailed, channel?, dfs?: {cacActive, cacSecondsLeft}, expected}], bss: [{section, radio, ifname, ssid, status, expected, bssid}], pskGuard: "skipped", problems: [{code, section, message, preexisting?}]}` |
+
+Apply refusals: `not_managed`, `config_not_allowed`, `insecure_transport`,
+`signature_required`, `not_paired`, `bad_signature`, `stale_signature`, `replayed`,
+`stale_base` (+`hashes`), `busy` (+`reason`: `apply_pending`, `luci_pending`, `uncommitted`,
+`groups_pending`, `update_pending`), `foreign_staged`, `not_owned`, `name_taken`, `no_section`,
+`invalid_config`, `apply_failed` (+`rolledBack`, `result`), `guard_missing`. The AP refuses
+on its own: any op on a section the device groups own or could own (their names `perch_ws*`,
+`perch_wv*`, `perch_v*`, `perch_bv*`, `perch_bvu`, `perch_dv*`, `perch_bd*`) → `not_owned`;
+creating, renaming or removing a radio (`wifi-device`), or reordering the existing
+`wifi-iface`s (their order is the BSSIDs') → `invalid_config`; a non-empty
+`guards.pskWildcardDigests` → `bad_params` (this release has no PSK guard); an apply
+(not a dry run) while the boot guard is missing → `guard_missing`.
+
+**An apply, on the AP.** The AP's one write lock is taken (the device groups and agent
+updates share it: `busy` / `groups_pending`, and `groups.apply` answers `plane_pending` while a
+Wi-Fi window is open); `wireless`, `network` and the ledger `/etc/config/perch-managed` are
+snapshotted to `/etc/perch-apd/plane/rollback/` (flash) with a marker in `/var/run/perch-apd`
+(tmpfs); the change is staged in a private rpcd session and committed (network before
+wireless), so procd reloads netifd as after a LuCI save. The reply is `pending_confirm`. The
+agent then waits until netifd has no radio or interface pending (up to 30 s), closes the
+session (`1000`, "reconnecting after apply …") and dials a new one at once, then every 2 s
+until connected. A job on the AP's own path to the controller (its interface, bridge and
+VLANs, or the radios of a wireless uplink) gets at least 300 s (`protected`).
+
+**Health check.** From the reconnect on, every 3 s: every radio of the job's expectation is up
+(`network.wireless status`: `up`, not `retry_setup_failed`) and every expected BSS beacons its
+SSID (`ubus call hostapd.<ifname> get_status`: `status` `ENABLED`, `ssid` as committed).
+Expected are the enabled AP interfaces on enabled radios of the committed config, plus the
+apply's `expect` (the union). A radar check (`status` `DFS`, `dfs.cac_active`) extends the
+wait by its seconds left + 15 s; a channel scan (`ACS`, `HT_SCAN`) or a starting BSS is
+waited for. The change is kept only when the check passed **and** the controller confirmed on a
+session newer than the apply's: a confirm before is `not_reconnected` (same session) or
+`health_pending` (+`health`). A check still failing when its time is up (`healthWaitSeconds`,
+longer during a radar check, never past the deadline minus 5 s) rolls the change back at once:
+`health_failed`, and a later confirm is `unhealthy` (+`health`, `rolledBack: true`). What was
+already broken before the apply (a radio netifd gave up on, a BSS that was down) is reported
+with `preexisting: true` and never rolled back for. Problem codes: `radio_down`,
+`radio_setup_failed`, `bss_missing`, `bss_disabled`, `ssid_mismatch`, `cac_running`,
+`acs_running`, `hostapd_unreachable`, `config_unreadable`, `status_unreadable`.
+
+**Rollback** (the deadline, `wifi.config.rollback`, a failed health check, a failure after
+the first commit): the snapshot's files are put back, the services reloaded, the device's own
+edits made during the window reported as `discarded`, and `wifi.config.result {applyId, kind,
+outcome: rolled_back | failed, reason: confirm_timeout | admin | reboot | commit_failed |
+reload_failed | health_failed, at, hashes, discarded?, health?, detail?}` sent (or kept in the
+hello's `results` until acknowledged). The agent then redials every 2 s for two minutes.
+
+**Restarts and reboots.** At start the daemon resumes a pending window (any session may
+confirm it) or restores it: no marker = rebooted (`reboot`), not fully committed
+(`commit_failed`), past its deadline (`confirm_timeout`). The boot guard
+`/etc/init.d/perch-apd-guard` (START=15, before `network` at 20) runs `perch-apd config-guard`,
+which restores after a reboot before netifd reads the files, without a reload; without a
+daemon that knows the plane it copies the snapshot back itself. The package ships the guard;
+with `wifi_config 'write'` the daemon writes and enables it when missing (`self_installed`).
+
+**Change notifications** (`observe` and `managed`): `wifi.config.changed {hashes, changed:
+[config], origin: router | perch, applyId?, author: {kind: luci | cli | perch | unknown,
+user?, via: trigger | poll}, at, uncommitted}` after a quiet `debounceSeconds`. procd's reload
+trigger on `wireless`/`network` makes the init script send SIGHUP (re-read at once, `via:
+trigger`); polling every `watchSeconds` finds CLI commits and editors (`via: poll`). The
+device groups' writes come as `origin: perch` with `applyId: "groups-<revision>"`. Held for up
+to 5 minutes while a LuCI apply-with-rollback waits for its confirm.
+
+`wifi.health.changed {at, ok, problems}`: outside a window, while the controller observes or
+manages, when a radio or an expected BSS went down or came back and stayed so for 30 s (radar
+checks and channel scans left out); each session gets the state once when steady.
+
+**Read-only checks on an AP** (from `/tmp`, nothing written): `perch-apd wifi caps`,
+`perch-apd wifi read [--fp-key-file FILE] [config…]` (fingerprints with an empty key unless
+FILE holds the 64-hex fleet key), `perch-apd wifi health`.
 
 ## 3. Security notes
 
@@ -415,6 +552,17 @@ do not know with -32601.
   more. With `option wifi_groups '1'` it can also add Wi-Fi passphrases and
   VLANs to the listed SSIDs (Perch's own sections only, rolled back unless
   confirmed): leave it off on APs that carry no device groups.
+- With `option wifi_config 'read'` (the package's default) a controller reads
+  the AP's `wireless` and `network` configs, passphrases only as fingerprints
+  (an offline dictionary attack on a weak passphrase is possible for whoever
+  has the fleet key and a read, as with a captured WPA2 handshake). With
+  `'write'` it can rewrite the whole Wi-Fi configuration and the VLAN plumbing
+  in `network`: open or re-key networks, disable radios, bridge an SSID onto
+  another VLAN. It can never write any other config (in particular not
+  `/etc/config/perch-apd`, so it cannot grant itself write access or re-point
+  the agent), run commands, or read a passphrase it did not set. Writes need
+  verified TLS; every change is rolled back unless the AP reaches the
+  controller on a fresh session and passes its health check.
 - Join tokens are stored hashed (and encrypted with `APP_KEY` so an admin can
   show one again). Agent secrets are stored as SHA-256 hashes.
 - Failed joins and failed WebSocket authentications are rate-limited per

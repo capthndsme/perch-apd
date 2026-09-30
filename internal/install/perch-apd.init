@@ -37,6 +37,21 @@ start_service() {
 	procd_close_instance
 }
 
+# procd reloads the service when wireless or network is committed through
+# rpcd (a LuCI save) or reload_config while the Wi-Fi config plane watches
+# them (option wifi_config read or write); reload_service tells the daemon to
+# read them again at once (SIGHUP). Commits without a reload (uci commit
+# alone, an editor) are found by polling.
+reload_service() {
+	start
+	procd_send_signal "$NAME" '*' HUP
+}
+
 service_triggers() {
+	local access
+
 	procd_add_reload_trigger "$NAME"
+	config_load "$NAME"
+	config_get access main wifi_config none
+	[ "$access" = "none" ] || procd_add_reload_trigger wireless network
 }

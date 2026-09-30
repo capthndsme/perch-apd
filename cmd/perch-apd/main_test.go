@@ -95,7 +95,9 @@ func TestPortsCommandReadsOnlySysfs(t *testing.T) {
 }
 
 // `perch-apd info` shows the capabilities the daemon would announce:
-// "ports" only while the configuration leaves port reporting on.
+// "ports" only while the configuration leaves port reporting on, and
+// "wifi_config" in every build with the Wi-Fi config plane (whatever the
+// access: wifiConfig.access tells).
 func TestInfoFollowsTheConfiguredPorts(t *testing.T) {
 	root := t.TempDir()
 	for p, v := range map[string]string{
@@ -116,9 +118,9 @@ func TestInfoFollowsTheConfiguredPorts(t *testing.T) {
 	}
 	dir := t.TempDir()
 	for _, tc := range []struct{ conf, want string }{
-		{"", "metrics,ports"}, // no file: the defaults
-		{"config agent 'main'\n\toption ports '1'\n", "metrics,ports"},
-		{"config agent 'main'\n\toption ports '0'\n", "metrics"},
+		{"", "metrics,ports,wifi_config"}, // no file: the defaults
+		{"config agent 'main'\n\toption ports '1'\n", "metrics,ports,wifi_config"},
+		{"config agent 'main'\n\toption ports '0'\n", "metrics,wifi_config"},
 	} {
 		path := filepath.Join(dir, "perch-apd")
 		os.Remove(path)
