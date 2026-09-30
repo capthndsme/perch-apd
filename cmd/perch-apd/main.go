@@ -54,6 +54,7 @@ Usage:
   perch-apd clients     print the associated Wi-Fi clients (JSON)
   perch-apd info        print what the controller sees in system.info (JSON)
   perch-apd ports       print the Ethernet ports and their link state (JSON)
+  perch-apd wifi caps   print what the Wi-Fi hardware and software can do (JSON, read-only)
   perch-apd version
 
 --install and --uninstall work too. Every command takes --config PATH
@@ -169,6 +170,8 @@ func run(args []string) int {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		enc.Encode(ports)
+	case "wifi":
+		return runWifi(ctx, *cfgPath, fs.Args())
 	case "version":
 		fmt.Fprintf(stdout, "perch-apd %s (%s)\n", version.Version, version.Arch())
 	case "help":

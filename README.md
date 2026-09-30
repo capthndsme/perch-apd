@@ -203,6 +203,9 @@ perch-apd metrics [--collect wifi,netdev]   print the metrics once
 perch-apd clients                 associated Wi-Fi clients, JSON
 perch-apd info                    what the controller sees (system.info), JSON
 perch-apd ports                   the Ethernet ports and their link state, JSON (reads /sys only)
+perch-apd wifi caps               what the Wi-Fi can do: hostapd features, regulatory domain, each
+                                  radio's channels/widths/modes, trunk port, networks, and the
+                                  radios carrying the uplink; JSON, read-only, no Wi-Fi key read
 perch-apd version
 ```
 
