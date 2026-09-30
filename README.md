@@ -204,8 +204,15 @@ perch-apd clients                 associated Wi-Fi clients, JSON
 perch-apd info                    what the controller sees (system.info), JSON
 perch-apd ports                   the Ethernet ports and their link state, JSON (reads /sys only)
 perch-apd wifi caps               what the Wi-Fi can do: hostapd features, regulatory domain, each
-                                  radio's channels/widths/modes, trunk port, networks, and the
-                                  radios carrying the uplink; JSON, read-only, no Wi-Fi key read
+                                  radio's channels/widths/modes, trunk port, networks, and what the
+                                  controller may do here (wifi.capabilities); JSON, read-only
+perch-apd wifi read [config...]   wireless and network as the controller reads them, passphrases as
+                                  fingerprints (wifi.config.read); JSON, read-only
+perch-apd wifi health             radios, BSSes and radar checks as they run (wifi.health); JSON
+perch-apd wifi access [none|read|write]
+                                  what the controller may do with this AP's Wi-Fi (option
+                                  wifi_config); setting it restarts the daemon
+perch-apd config-guard            boot guard of Wi-Fi changes (init script perch-apd-guard)
 perch-apd version
 ```
 

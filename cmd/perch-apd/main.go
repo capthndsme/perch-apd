@@ -54,7 +54,13 @@ Usage:
   perch-apd clients     print the associated Wi-Fi clients (JSON)
   perch-apd info        print what the controller sees in system.info (JSON)
   perch-apd ports       print the Ethernet ports and their link state (JSON)
-  perch-apd wifi caps   print what the Wi-Fi hardware and software can do (JSON, read-only)
+  perch-apd wifi caps | read | health
+                        print the Wi-Fi's capabilities, configuration (secrets as
+                        fingerprints) or health as the controller sees them (JSON, read-only)
+  perch-apd wifi access [none|read|write]
+                        show or set what the controller may do with this AP's Wi-Fi
+  perch-apd config-guard
+                        boot guard of Wi-Fi changes (init script perch-apd-guard)
   perch-apd version
 
 --install and --uninstall work too. Every command takes --config PATH
@@ -144,8 +150,13 @@ func run(args []string) int {
 		if cmd == "info" {
 			// As the daemon answers: no "ports" when the configuration turns
 			// them off (a missing or broken file means the defaults).
-			if cfg, err := config.Load(*cfgPath); err == nil && !cfg.Ports {
-				d.deps.Ports = nil
+			if cfg, err := config.Load(*cfgPath); err == nil {
+				if !cfg.Ports {
+					d.deps.Ports = nil
+				}
+				if w := cliWifiPlane(cfg, d); w != nil {
+					d.deps.Wifi = w
+				}
 			}
 			out = d.deps.SystemInfo(ctx)
 		} else {
@@ -172,6 +183,8 @@ func run(args []string) int {
 		enc.Encode(ports)
 	case "wifi":
 		return runWifi(ctx, *cfgPath, fs.Args())
+	case "config-guard":
+		return configGuardCommand(fs.Args(), stdout, os.Stderr, "")
 	case "version":
 		fmt.Fprintf(stdout, "perch-apd %s (%s)\n", version.Version, version.Arch())
 	case "help":
@@ -206,6 +219,9 @@ type device struct {
 	// applyLock is the AP's one write lock: device groups, the Wi-Fi config
 	// plane and agent updates each hold it through their confirm window.
 	applyLock *applylock.Lock
+	// groupsWrote tells the Wi-Fi config plane what the device groups wrote
+	// (set before the engine starts).
+	groupsWrote func(applyID string, hashes map[string]string)
 }
 
 // newDevice opens what the hardware commands use (ubus, nl80211, LEDs). A
@@ -272,7 +288,12 @@ func newGroupsEngine(d *device, log *slog.Logger) (*groups.Engine, error) {
 			return nil
 		},
 		Stations: func() ([]groups.StationSeen, error) { return groupStations(d.nl) },
-		Log:      log,
+		Wrote: func(applyID string, hashes map[string]string) {
+			if d.groupsWrote != nil {
+				d.groupsWrote(applyID, hashes)
+			}
+		},
+		Log: log,
 	})
 }
 
@@ -355,6 +376,13 @@ func newLogger(level string) *slog.Logger {
 }
 
 func runDaemon(ctx context.Context, cfgPath string) int {
+	// SIGHUP is procd's reload trigger on wireless and network (the init
+	// script's reload_service): the Wi-Fi plane re-reads at once. Caught from
+	// the start: by default it would end the daemon.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "perch-apd:", err)
@@ -392,7 +420,6 @@ func runDaemon(ctx context.Context, cfgPath string) int {
 		if err != nil {
 			log.Error("device groups are off: the engine did not start", "err", err)
 		} else {
-			eng.Start(ctx)
 			d.deps.Groups = eng
 			if !strings.HasPrefix(cfg.Controller, "https://") && !cfg.WifiGroupsInsecure {
 				d.deps.GroupsRefusal = "device groups over a plain http:// controller need option wifi_groups_insecure '1'"
@@ -402,6 +429,32 @@ func runDaemon(ctx context.Context, cfgPath string) int {
 			}
 		}
 	}
+
+	// The Wi-Fi config plane, then both writers resume what a restart
+	// interrupted (a pending window takes the write lock again).
+	wp := newWifiPlane(cfg, d, log)
+	if wp != nil {
+		d.deps.Wifi = wp
+		d.groupsWrote = wp.GroupsWrote
+	}
+	if d.deps.Groups != nil {
+		d.deps.Groups.Start(ctx)
+	}
+	if wp != nil {
+		wp.Start()
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				if wp != nil {
+					wp.Trigger()
+				}
+			}
+		}
+	}()
 
 	disp := rpc.NewDispatcher()
 	handlers.Register(disp, d.deps)
@@ -420,10 +473,18 @@ func runDaemon(ctx context.Context, cfgPath string) int {
 	} else {
 		log.Info("not reporting the Ethernet ports (option ports '0')")
 	}
-	ag, err := agent.New(agent.Options{Config: cfg, Log: log, Dispatcher: disp, Info: d.info, Metrics: d.registry, Ports: ports})
+	aopts := agent.Options{Config: cfg, Log: log, Dispatcher: disp, Info: d.info, Metrics: d.registry, Ports: ports}
+	if wp != nil {
+		aopts.OnConfigure, aopts.OnSessionEnd, aopts.RedialFast = wp.Configure, wp.EndSession, wp.RedialFast
+	}
+	ag, err := agent.New(aopts)
 	if err != nil {
 		log.Error("cannot start the controller session", "err", err)
 		return 1
+	}
+	if wp != nil {
+		wp.Session(ag.SessionRef, ag.Send, ag.Reconnect)
+		go wp.Run(ctx)
 	}
 	d.locator.OnEnd = func(reason string) {
 		ag.Notify("locate.ended", map[string]string{"reason": reason})

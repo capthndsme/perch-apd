@@ -6,7 +6,7 @@ DIST    := dist
 
 export CGO_ENABLED := 0
 
-.PHONY: build test vet release clean
+.PHONY: build test vet release clean size
 
 build:  ## native binary in out/
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o out/perch-apd ./cmd/perch-apd
@@ -41,6 +41,18 @@ release: clean
 	fi
 	cd $(DIST) && sha256sum perch-apd-linux-* install.sh > checksums.txt
 	@ls -l $(DIST)
+
+# What the Wi-Fi config plane adds to the binary: the mipsle build (the APs
+# with the least flash) with and without it (-tags noplane leaves it out).
+# Fails over the budget (Wi-Fi design: 400 KB).
+SIZE_BUDGET ?= 409600
+size:
+	@mkdir -p out
+	GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o out/size-plane ./cmd/perch-apd
+	GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build $(GOFLAGS) -tags noplane -ldflags "$(LDFLAGS)" -o out/size-noplane ./cmd/perch-apd
+	@with=$$(wc -c < out/size-plane); without=$$(wc -c < out/size-noplane); delta=$$((with - without)); \
+	echo "perch-apd mipsle: $$with bytes; without the Wi-Fi config plane $$without; the plane adds $$delta (budget $(SIZE_BUDGET))"; \
+	[ $$delta -le $(SIZE_BUDGET) ] || { echo "over the budget"; exit 1; }
 
 clean:
 	rm -rf $(DIST) out

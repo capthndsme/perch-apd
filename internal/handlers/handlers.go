@@ -57,6 +57,9 @@ type Deps struct {
 	// GroupsRefusal: why groups.apply is refused although Groups is set
 	// (plain ws:// without wifi_groups_insecure), "" = allowed.
 	GroupsRefusal string
+	// Wifi is the Wi-Fi config plane (wifi.*, capability wifi_config); nil
+	// in a build without it.
+	Wifi WifiPlane
 }
 
 func (d *Deps) now() time.Time {
@@ -78,6 +81,7 @@ func Register(disp *rpc.Dispatcher, d *Deps) {
 	disp.Register("groups.apply", d.groupsApply)
 	disp.Register("groups.confirm", d.groupsConfirm)
 	disp.Register("groups.state", d.groupsState)
+	registerWifi(disp, d.Wifi)
 }
 
 // groupsError maps a groups refusal onto the protocol's errors.
@@ -163,6 +167,9 @@ type SystemInfo struct {
 	Capabilities  []string         `json:"capabilities"`
 	Radios        []wireless.Radio `json:"radios"`
 	Interfaces    []wireless.Iface `json:"interfaces"`
+	// WifiConfig is the Wi-Fi config plane's hello (access, hashes, the
+	// apply in progress, results to acknowledge); absent without a plane.
+	WifiConfig any `json:"wifiConfig,omitempty"`
 }
 
 // SystemInfo gathers the system.info result (also used by `perch-apd info`).
@@ -202,6 +209,9 @@ func (d *Deps) SystemInfo(ctx context.Context) SystemInfo {
 		}
 	}
 	info.Capabilities = d.Capabilities(ctx)
+	if d.Wifi != nil {
+		info.WifiConfig = d.Wifi.Hello(ctx)
+	}
 	return info
 }
 
@@ -233,6 +243,10 @@ func (d *Deps) Capabilities(ctx context.Context) []string {
 	}
 	if d.Groups != nil && d.GroupsRefusal == "" {
 		caps = append(caps, "wifi_groups")
+	}
+	if d.Wifi != nil {
+		// Whatever the access: system.info's wifiConfig.access tells.
+		caps = append(caps, "wifi_config")
 	}
 	return caps
 }
