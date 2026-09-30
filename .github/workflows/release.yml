@@ -24,8 +24,15 @@ jobs:
           # when 1.26 stops getting security fixes (Go 1.28, Feb 2027).
           go-version: "1.26.x"
       - run: go test ./...
+      # Reproducible (Makefile): the owner rebuilds these with the Go release
+      # recorded in them before signing the manifest (scripts/sign-release.sh).
       - name: Build
         run: make release VERSION="${GITHUB_REF_NAME#v}"
+      # The files bundle a self-update installs next to the binary on devices
+      # no package manages; the kit's perch-release builds it (openwrt.yml adds
+      # the unsigned manifest once the packages are attached).
+      - name: Files bundle
+        run: make files
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

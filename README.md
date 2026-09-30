@@ -318,6 +318,26 @@ Pure Go, no cgo: `CGO_ENABLED=0` cross-compiles to every target (MIPS with
 `GOMIPS=softfloat`). Pushing a `v*` tag runs `.github/workflows/release.yml`, which
 publishes the assets the install commands download.
 
+### Releases and signing
+
+The builds are reproducible (the Makefile says how): the same commit and Go release
+give the same bytes on any machine. A self-update installs only a release whose
+`perch-manifest.json` the owner signed; CI attaches the manifest unsigned
+(`openwrt.yml`, once the packages are built) and never holds a key.
+
+```sh
+scripts/sign-release.sh 1.2.0          # download, rebuild, compare, sign, --upload the .sig
+scripts/local-release.sh 1.2.0-pre.5 --controller https://perch.example.com
+                                       # an unpublished build: build, sign-release, upload
+make files                             # the files bundle (openwrt/perch-apd/files.json)
+```
+
+`sign-release.sh` refuses to sign unless its own rebuild of the manifest's commit
+matches what was published: every binary byte for byte, every OpenWrt package by the
+files, modes, hashes, maintainer scripts and dependencies it installs (rebuilt in the
+SDK image; archive metadata may differ), the bundle by its members. signify-openbsd asks
+for the key's passphrase itself. `release.env` holds the next release's floor fields.
+
 The WebSocket session (dial, pings, JSON-RPC, calls, the push scheduler, reconnect
 backoff) and the `/proc` parsers for load, memory, interface counters and conntrack come
 from [perch-agentkit](https://github.com/capthndsme/perch-agentkit), which the
