@@ -312,22 +312,10 @@ func evaluate(now time.Time, rs runState, e expectation, broken before) (Report,
 	for _, b := range broken.BSS {
 		brokenBSS[b] = true
 	}
-	counting, lasting := 0, 0
+	t := &problemTally{problems: rep.Problems}
 	var extend time.Duration
-	// add records a problem; transient ones are on their way to fixing
-	// themselves (a radar check, a channel scan, a radio being set up).
-	add := func(p Problem, transient bool) {
-		rep.Problems = append(rep.Problems, p)
-		if p.Preexisting {
-			return
-		}
-		counting++
-		if !transient {
-			lasting++
-		}
-	}
 	if rs.err != nil {
-		add(Problem{Code: ProblemStatusUnreadable, Message: "network.wireless status: " + rs.err.Error()}, false)
+		t.add(Problem{Code: ProblemStatusUnreadable, Message: "network.wireless status: " + rs.err.Error()}, false)
 	}
 	// Radios: every one netifd knows, and every expected one.
 	names := map[string]bool{}
@@ -362,13 +350,13 @@ func evaluate(now time.Time, rs runState, e expectation, broken before) (Report,
 		pre := brokenRadio[name]
 		switch {
 		case !known:
-			add(Problem{Code: ProblemRadioDown, Section: name, Message: name + " is not in netifd's wireless status", Preexisting: pre}, false)
+			t.add(Problem{Code: ProblemRadioDown, Section: name, Message: name + " is not in netifd's wireless status", Preexisting: pre}, false)
 		case st.RetrySetupFailed:
-			add(Problem{Code: ProblemRadioSetupFailed, Section: name, Message: name + ": netifd gave up setting the radio up (retry_setup_failed)", Preexisting: pre}, false)
+			t.add(Problem{Code: ProblemRadioSetupFailed, Section: name, Message: name + ": netifd gave up setting the radio up (retry_setup_failed)", Preexisting: pre}, false)
 		case !st.Up && st.Pending:
-			add(Problem{Code: ProblemRadioDown, Section: name, Message: name + " is being set up", Preexisting: pre}, true)
+			t.add(Problem{Code: ProblemRadioDown, Section: name, Message: name + " is being set up", Preexisting: pre}, true)
 		case !st.Up:
-			add(Problem{Code: ProblemRadioDown, Section: name, Message: name + " is down", Preexisting: pre}, false)
+			t.add(Problem{Code: ProblemRadioDown, Section: name, Message: name + " is down", Preexisting: pre}, false)
 		}
 	}
 	// BSSes: the expected ones and every AP interface that runs.
@@ -404,14 +392,14 @@ func evaluate(now time.Time, rs runState, e expectation, broken before) (Report,
 		}
 		switch {
 		case run == nil:
-			add(Problem{Code: ProblemBSSMissing, Section: name, Message: name + " has no running interface", Preexisting: pre}, false)
+			t.add(Problem{Code: ProblemBSSMissing, Section: name, Message: name + " has no running interface", Preexisting: pre}, false)
 		case !run.reachable:
-			add(Problem{Code: ProblemHostapdUnreachable, Section: name, Message: "hostapd." + run.ifname + " does not answer", Preexisting: pre}, false)
+			t.add(Problem{Code: ProblemHostapdUnreachable, Section: name, Message: "hostapd." + run.ifname + " does not answer", Preexisting: pre}, false)
 		default:
 			switch run.st.Status {
 			case "ENABLED":
 				if exp.ssid != "" && run.st.SSID != exp.ssid {
-					add(Problem{Code: ProblemSSIDMismatch, Section: name, Preexisting: pre,
+					t.add(Problem{Code: ProblemSSIDMismatch, Section: name, Preexisting: pre,
 						Message: fmt.Sprintf("%s beacons %q, the config says %q", run.ifname, run.st.SSID, exp.ssid)}, false)
 				}
 			case "DFS":
@@ -427,7 +415,7 @@ func evaluate(now time.Time, rs runState, e expectation, broken before) (Report,
 				if cacRadio[run.radio] {
 					// One problem per radio; the BSS still counts.
 					if !pre {
-						counting++
+						t.counting++
 					}
 					continue
 				}
@@ -436,20 +424,43 @@ func evaluate(now time.Time, rs runState, e expectation, broken before) (Report,
 				if left > 0 {
 					msg += fmt.Sprintf(", %d s left", left)
 				}
-				add(Problem{Code: ProblemCACRunning, Section: run.radio, Message: msg, Preexisting: pre}, true)
+				t.add(Problem{Code: ProblemCACRunning, Section: run.radio, Message: msg, Preexisting: pre}, true)
 			case "ACS", "HT_SCAN":
-				add(Problem{Code: ProblemACSRunning, Section: name, Message: run.ifname + " is choosing a channel (" + run.st.Status + ")", Preexisting: pre}, true)
+				t.add(Problem{Code: ProblemACSRunning, Section: name, Message: run.ifname + " is choosing a channel (" + run.st.Status + ")", Preexisting: pre}, true)
 			case "COUNTRY_UPDATE", "UNINITIALIZED", "":
-				add(Problem{Code: ProblemBSSDisabled, Section: name, Message: run.ifname + " is starting (" + orUnknown(run.st.Status) + ")", Preexisting: pre}, true)
+				t.add(Problem{Code: ProblemBSSDisabled, Section: name, Message: run.ifname + " is starting (" + orUnknown(run.st.Status) + ")", Preexisting: pre}, true)
 			default:
-				add(Problem{Code: ProblemBSSDisabled, Section: name, Message: run.ifname + " is " + run.st.Status, Preexisting: pre}, false)
+				t.add(Problem{Code: ProblemBSSDisabled, Section: name, Message: run.ifname + " is " + run.st.Status, Preexisting: pre}, false)
 			}
 		}
 	}
-	ok := counting == 0
+	rep.Problems = t.problems
+	ok := t.counting == 0
 	rep.OK = ok
-	rep.Pending = !ok && lasting == 0
+	rep.Pending = !ok && t.lasting == 0
 	return rep, ok, extend
+}
+
+// problemTally collects a check's problems; transient ones are on their way
+// to fixing themselves (a radar check, a channel scan, a radio being set up).
+type problemTally struct {
+	problems          []Problem
+	counting, lasting int
+}
+
+// add records a problem. Never inlined: it has a dozen callers, where a copy
+// would cost more than the call (mipsle size).
+//
+//go:noinline
+func (t *problemTally) add(p Problem, transient bool) {
+	t.problems = append(t.problems, p)
+	if p.Preexisting {
+		return
+	}
+	t.counting++
+	if !transient {
+		t.lasting++
+	}
 }
 
 func orUnknown(s string) string {

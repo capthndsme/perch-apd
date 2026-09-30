@@ -25,6 +25,10 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - run: make release VERSION=ci
+      # The mipsle binary's size budgets (Makefile); the numbers are the
+      # release toolchain's.
+      - run: make size VERSION=ci
+        if: matrix.go == '1.26.x'
       - uses: actions/upload-artifact@v4
         if: matrix.go == '1.26.x'
         with:

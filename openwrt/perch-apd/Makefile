@@ -43,6 +43,8 @@ PKG_BUILD_FLAGS:=no-mips16
 GO_PKG:=github.com/capthndsme/perch-apd
 GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/perch-apd
 GO_PKG_LDFLAGS:=-s -w
+# HTTP/1.1 only, without net/http's bundled HTTP/2 (the Makefile's TAGS).
+GO_PKG_TAGS:=nethttpomithttp2
 GO_PKG_LDFLAGS_X:=$(GO_PKG)/internal/version.Version=$(PERCH_VERSION)
 
 include $(INCLUDE_DIR)/package.mk

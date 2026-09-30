@@ -266,8 +266,12 @@ also encoded in one pass instead of three. The daemon sets a 32 MiB soft memory 
 for the Go runtime unless `GOMEMLIMIT` is set.
 
 The binary has no HTTP server; most of it is Go's TLS and HTTP client, which the
-WebSocket needs. Its size depends on the Go release it is built with more than on
-anything in this repository (MIPS, stripped, same code):
+WebSocket needs. Builds leave net/http's bundled HTTP/2 out (build tag
+`nethttpomithttp2`, set by the Makefile and the OpenWrt package): the daemon only speaks
+HTTP/1.1, which a WebSocket upgrade needs anyway, and the unused HTTP/2 client would add
+~390 KB on MIPS. `make size` checks the mipsle binary against its budgets. Its size
+depends on the Go release it is built with more than on anything in this repository
+(MIPS, stripped, same code):
 
 | Go | mipsle | gzip (≈ flash on JFFS2/UBIFS) | arm64 |
 |---|---|---|---|
@@ -302,6 +306,7 @@ Releases pin the older supported Go line (`release.yml`) for that reason.
 make test        # go test ./...
 make build       # out/perch-apd for this machine
 make release     # dist/: every architecture, install.sh, checksums.txt
+make size        # mipsle size budgets: the Wi-Fi config plane, the whole binary (gzip)
 ```
 
 Pure Go, no cgo: `CGO_ENABLED=0` cross-compiles to every target (MIPS with

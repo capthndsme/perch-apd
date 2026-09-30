@@ -37,7 +37,6 @@ import (
 	"github.com/capthndsme/perch-apd/internal/version"
 	"github.com/capthndsme/perch-apd/internal/wireless"
 	"os/exec"
-	"regexp"
 )
 
 const usage = `perch-apd %s: Perch AP Daemon
@@ -306,7 +305,28 @@ func newGroupsEngine(d *device, log *slog.Logger) (*groups.Engine, error) {
 	})
 }
 
-var groupVLANName = regexp.MustCompile(`-g([0-9]{1,4})$`)
+// groupVLANID is the VLAN id in the name of an AP_VLAN interface hostapd
+// made for a group (<ifname>-g<vid>, 1-4 digits at the end). No regexp: this
+// one pattern cost the mipsle binary ~260 KB.
+func groupVLANID(name string) (int, bool) {
+	i := strings.LastIndex(name, "-g")
+	if i < 0 {
+		return 0, false
+	}
+	digits := name[i+2:]
+	if len(digits) < 1 || len(digits) > 4 {
+		return 0, false
+	}
+	vid := 0
+	for j := 0; j < len(digits); j++ {
+		c := digits[j]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		vid = vid*10 + int(c-'0')
+	}
+	return vid, true
+}
 
 // groupStations lists the stations hostapd moved to group VLANs (AP_VLAN
 // interfaces named <ifname>-g<vid>).
@@ -323,11 +343,10 @@ func groupStations(nl *nl80211.Client) ([]groups.StationSeen, error) {
 		if ifi.Type != nl80211.IfTypeAPVLAN {
 			continue
 		}
-		m := groupVLANName.FindStringSubmatch(ifi.Name)
-		if m == nil {
+		vid, ok := groupVLANID(ifi.Name)
+		if !ok {
 			continue
 		}
-		vid, _ := strconv.Atoi(m[1])
 		stas, err := nl.Stations(ifi.Index)
 		if err != nil {
 			continue
